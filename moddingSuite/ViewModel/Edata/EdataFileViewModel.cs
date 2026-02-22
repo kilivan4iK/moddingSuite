@@ -1,17 +1,20 @@
-﻿using System.Collections.ObjectModel;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Windows.Data;
+using System.Windows.Input;
 using moddingSuite.BL;
 using moddingSuite.Model.Edata;
 using moddingSuite.ViewModel.Base;
-using System.Windows.Input;
 
 namespace moddingSuite.ViewModel.Edata
 {
     public class EdataFileViewModel : ViewModelBase
     {
         private ObservableCollection<EdataContentFile> _files;
+        private readonly ObservableCollection<EdataContentFile> _selectedFiles = new ObservableCollection<EdataContentFile>();
         private ICollectionView _filesCollectionView;
         private string _filterExpression = string.Empty;
         private string _loadedFile = string.Empty;
@@ -46,7 +49,11 @@ namespace moddingSuite.ViewModel.Edata
             if (file == null)
                 return;
 
-            switch (file.FileType)
+            var fileType = file.FileType;
+            if (fileType == EdataFileType.Unknown)
+                fileType = EdataManager.GetFileTypeFromFileName(file.Name);
+
+            switch (fileType)
             {
                 case EdataFileType.Ndfbin:
                     ParentVm.EditNdfbinCommand.Execute(obj);
@@ -62,6 +69,16 @@ namespace moddingSuite.ViewModel.Edata
                     break;
                 case EdataFileType.Scenario:
                     ParentVm.EditScenarioCommand.Execute(obj);
+                    break;
+                case EdataFileType.Package:
+                    ParentVm.OpenNestedPackage(file, this);
+                    break;
+                case EdataFileType.Video:
+                    ParentVm.PlayMovieCommand.Execute(obj);
+                    break;
+                default:
+                    if (file.Name.EndsWith(".ess", StringComparison.OrdinalIgnoreCase))
+                        ParentVm.ExportSoundCommand.Execute(obj);
                     break;
             }
         }
@@ -97,6 +114,11 @@ namespace moddingSuite.ViewModel.Edata
             }
         }
 
+        public ObservableCollection<EdataContentFile> SelectedFiles
+        {
+            get { return _selectedFiles; }
+        }
+
         public ICollectionView FilesCollectionView
         {
             get
@@ -129,7 +151,22 @@ namespace moddingSuite.ViewModel.Edata
 
             EdataManager.ParseEdataFile();
             Files = EdataManager.Files;
+            _selectedFiles.Clear();
             CreateFilesCollectionView();
+        }
+
+        public void SetSelectedFiles(IEnumerable<EdataContentFile> selectedFiles)
+        {
+            _selectedFiles.Clear();
+
+            if (selectedFiles == null)
+                return;
+
+            foreach (EdataContentFile file in selectedFiles)
+            {
+                if (file != null)
+                    _selectedFiles.Add(file);
+            }
         }
 
         public bool FilterPath(object item)

@@ -53,7 +53,8 @@
             CanUserResizeRows="False"
             IsSynchronizedWithCurrentItem="True"
             ItemsSource="{Binding Path=FilesCollectionView}"
-            SelectionMode="Single"
+            SelectionMode="Extended"
+            SelectionChanged="DataGrid_OnSelectionChanged"
             SelectionUnit="FullRow">
             <DataGrid.InputBindings>
                 <MouseBinding

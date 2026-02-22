@@ -19,6 +19,7 @@ namespace moddingSuite.BL
     public class EdataManager : ViewModelBase
     {
         public static readonly byte[] EdataMagic = { 0x65, 0x64, 0x61, 0x74 };
+        private bool _v2UsesLegacyNamePadding = true;
 
         /// <summary>
         /// Creates a new Instance of a EdataManager.
@@ -78,12 +79,15 @@ namespace moddingSuite.BL
 
             byte[] buffer;
 
-            using (FileStream fs = File.Open(FilePath, FileMode.Open))
+            using (FileStream fs = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
-                long offset = Header.FileOffset + ofFile.Offset;
+                long offset = checked((long)Header.FileOffset + ofFile.Offset);
                 fs.Seek(offset, SeekOrigin.Begin);
 
-                buffer = new byte[ofFile.Size];
+                if (ofFile.Size > int.MaxValue)
+                    throw new NotSupportedException(string.Format("File '{0}' is too large to load in memory ({1} bytes).", ofFile.Path, ofFile.Size));
+
+                buffer = new byte[(int)ofFile.Size];
                 fs.Read(buffer, 0, buffer.Length);
             }
 
@@ -120,7 +124,7 @@ namespace moddingSuite.BL
 
             var buffer = new byte[Marshal.SizeOf(typeof(EdataHeader))];
 
-            using (var fs = File.Open(FilePath, FileMode.Open))
+            using (var fs = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 fs.Read(buffer, 0, buffer.Length);
 
             header = Utils.ByteArrayToStructure<EdataHeader>(buffer);
@@ -137,11 +141,38 @@ namespace moddingSuite.BL
         /// <returns>A Collection of the Files found in the Dictionary</returns>
         protected ObservableCollection<EdataContentFile> ReadEdatV2Dictionary()
         {
+            Exception legacyLayoutException = null;
+
+            try
+            {
+                _v2UsesLegacyNamePadding = true;
+                return ReadEdatV2Dictionary(true);
+            }
+            catch (Exception ex) when (IsRecoverableV2DictionaryException(ex))
+            {
+                legacyLayoutException = ex;
+            }
+
+            try
+            {
+                _v2UsesLegacyNamePadding = false;
+                return ReadEdatV2Dictionary(false);
+            }
+            catch (Exception ex) when (IsRecoverableV2DictionaryException(ex))
+            {
+                throw new InvalidDataException(
+                    string.Format("Could not parse EDAT V2 dictionary with either legacy or WARNO layout. Legacy parse error: {0}", legacyLayoutException == null ? "n/a" : legacyLayoutException.Message),
+                    ex);
+            }
+        }
+
+        protected ObservableCollection<EdataContentFile> ReadEdatV2Dictionary(bool useLegacyNamePadding)
+        {
             var files = new ObservableCollection<EdataContentFile>();
             var dirs = new List<EdataDir>();
             var endings = new List<long>();
 
-            using (FileStream fileStream = File.Open(FilePath, FileMode.Open))
+            using (FileStream fileStream = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
                 fileStream.Seek(Header.DictOffset, SeekOrigin.Begin);
 
@@ -150,36 +181,33 @@ namespace moddingSuite.BL
 
                 while (fileStream.Position < dirEnd)
                 {
-                    var buffer = new byte[4];
-                    fileStream.Read(buffer, 0, 4);
+                    var buffer = ReadDictionaryBytes(fileStream, 4, dirEnd, "fileGroupId");
                     int fileGroupId = BitConverter.ToInt32(buffer, 0);
 
                     if (fileGroupId == 0)
                     {
                         var file = new EdataContentFile();
-                        fileStream.Read(buffer, 0, 4);
+                        buffer = ReadDictionaryBytes(fileStream, 4, dirEnd, "file.FileEntrySize");
                         file.FileEntrySize = BitConverter.ToInt32(buffer, 0);
 
-                        buffer = new byte[8];
-                        fileStream.Read(buffer, 0, buffer.Length);
+                        buffer = ReadDictionaryBytes(fileStream, 8, dirEnd, "file.Offset");
                         file.Offset = BitConverter.ToInt64(buffer, 0);
 
-                        fileStream.Read(buffer, 0, buffer.Length);
+                        buffer = ReadDictionaryBytes(fileStream, 8, dirEnd, "file.Size");
                         file.Size = BitConverter.ToInt64(buffer, 0);
 
-                        var checkSum = new byte[16];
-                        fileStream.Read(checkSum, 0, checkSum.Length);
+                        var checkSum = ReadDictionaryBytes(fileStream, 16, dirEnd, "file.Checksum");
                         file.Checksum = checkSum;
 
-                        file.Name = Utils.ReadString(fileStream);
+                        file.Name = ReadDictionaryString(fileStream, dirEnd);
                         file.Path = MergePath(dirs, file.Name);
 
-                        if (file.Name.Length % 2 == 0)
-                            fileStream.Seek(1, SeekOrigin.Current);
+                        SkipLegacyV2NamePadding(fileStream, dirEnd, useLegacyNamePadding, file.Name);
 
                         file.Id = id;
                         id++;
 
+                        ValidateV2FileEntry(file, fileStream.Length);
                         ResolveFileType(fileStream, file);
 
                         files.Add(file);
@@ -194,7 +222,7 @@ namespace moddingSuite.BL
                     {
                         var dir = new EdataDir();
 
-                        fileStream.Read(buffer, 0, 4);
+                        buffer = ReadDictionaryBytes(fileStream, 4, dirEnd, "dir.FileEntrySize");
                         dir.FileEntrySize = BitConverter.ToInt32(buffer, 0);
 
                         if (dir.FileEntrySize != 0)
@@ -202,12 +230,15 @@ namespace moddingSuite.BL
                         else if (endings.Count > 0)
                             endings.Add(endings.Last());
 
-                        dir.Name = Utils.ReadString(fileStream);
+                        dir.Name = ReadDictionaryString(fileStream, dirEnd);
 
-                        if (dir.Name.Length % 2 == 0)
-                            fileStream.Seek(1, SeekOrigin.Current);
+                        SkipLegacyV2NamePadding(fileStream, dirEnd, useLegacyNamePadding, dir.Name);
 
                         dirs.Add(dir);
+                    }
+                    else
+                    {
+                        throw new InvalidDataException(string.Format("Invalid fileGroupId '{0}' in EDAT V2 dictionary at position {1}.", fileGroupId, fileStream.Position - 4));
                     }
                 }
             }
@@ -220,7 +251,7 @@ namespace moddingSuite.BL
             var dirs = new List<EdataDir>();
             var endings = new List<long>();
 
-            using (FileStream fileStream = File.Open(FilePath, FileMode.Open))
+            using (FileStream fileStream = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
                 fileStream.Seek(Header.DictOffset, SeekOrigin.Begin);
 
@@ -399,7 +430,7 @@ namespace moddingSuite.BL
 
                             string name = Utils.ReadString(newFile);
 
-                            if ((name.Length + 1) % 2 == 1)
+                            if (ShouldUseLegacyV2Padding(name))
                                 newFile.Seek(1, SeekOrigin.Current);
 
                             id++;
@@ -409,7 +440,7 @@ namespace moddingSuite.BL
                             newFile.Seek(4, SeekOrigin.Current);
                             string name = Utils.ReadString(newFile);
 
-                            if ((name.Length + 1) % 2 == 1)
+                            if (ShouldUseLegacyV2Padding(name))
                                 newFile.Seek(1, SeekOrigin.Current);
                         }
                     }
@@ -573,12 +604,39 @@ namespace moddingSuite.BL
             // save original offset
             long origOffset = fs.Position;
 
-            fs.Seek(file.Offset + Header.FileOffset, SeekOrigin.Begin);
+            try
+            {
+                long absoluteOffset = checked((long)Header.FileOffset + file.Offset);
+                if (absoluteOffset < 0 || absoluteOffset >= fs.Length)
+                {
+                    file.FileType = GetFileTypeFromFileName(file.Name);
+                    return;
+                }
 
-            var headerBuffer = new byte[12];
-            fs.Read(headerBuffer, 0, headerBuffer.Length);
+                fs.Seek(absoluteOffset, SeekOrigin.Begin);
 
-            file.FileType = GetFileTypeFromHeaderData(headerBuffer);
+                var headerBuffer = new byte[12];
+                int bytesToRead = (int)Math.Min(headerBuffer.Length, fs.Length - absoluteOffset);
+                if (bytesToRead <= 0)
+                {
+                    file.FileType = GetFileTypeFromFileName(file.Name);
+                    return;
+                }
+
+                fs.Read(headerBuffer, 0, bytesToRead);
+                file.FileType = GetFileTypeFromHeaderData(headerBuffer);
+
+                if (file.FileType == EdataFileType.Unknown)
+                    file.FileType = GetFileTypeFromFileName(file.Name);
+            }
+            catch (IOException)
+            {
+                file.FileType = GetFileTypeFromFileName(file.Name);
+            }
+            catch (OverflowException)
+            {
+                file.FileType = GetFileTypeFromFileName(file.Name);
+            }
 
             // set offset back to original
             fs.Seek(origOffset, SeekOrigin.Begin);
@@ -613,6 +671,119 @@ namespace moddingSuite.BL
             }
 
             return EdataFileType.Unknown;
+        }
+
+        public static EdataFileType GetFileTypeFromFileName(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+                return EdataFileType.Unknown;
+
+            string ext = Path.GetExtension(fileName);
+            if (string.IsNullOrWhiteSpace(ext))
+                return EdataFileType.Unknown;
+
+            ext = ext.ToLowerInvariant();
+
+            switch (ext)
+            {
+                case ".tgv":
+                    return EdataFileType.Image;
+                case ".ndfbin":
+                    return EdataFileType.Ndfbin;
+                case ".dic":
+                    return EdataFileType.Dictionary;
+                case ".mesh":
+                    return EdataFileType.Mesh;
+                case ".scenario":
+                case ".scen":
+                    return EdataFileType.Scenario;
+                case ".sav":
+                    return EdataFileType.Save;
+                case ".wmv":
+                    return EdataFileType.Video;
+                case ".dat":
+                case ".edat":
+                case ".apk":
+                case ".cpk":
+                case ".mpk":
+                case ".spk":
+                    return EdataFileType.Package;
+                default:
+                    return EdataFileType.Unknown;
+            }
+        }
+
+        private static bool IsRecoverableV2DictionaryException(Exception ex)
+        {
+            return ex is IOException ||
+                   ex is EndOfStreamException ||
+                   ex is InvalidDataException ||
+                   ex is OverflowException ||
+                   ex is ArgumentOutOfRangeException;
+        }
+
+        private static byte[] ReadDictionaryBytes(Stream stream, int length, long dictionaryEnd, string fieldName)
+        {
+            if (stream.Position + length > dictionaryEnd)
+                throw new InvalidDataException(string.Format("Cannot read {0} in EDAT dictionary. Position={1}, required={2}, dictionaryEnd={3}", fieldName, stream.Position, length, dictionaryEnd));
+
+            var buffer = new byte[length];
+            int read = stream.Read(buffer, 0, length);
+            if (read != length)
+                throw new EndOfStreamException(string.Format("Unexpected EOF while reading {0} from EDAT dictionary.", fieldName));
+
+            return buffer;
+        }
+
+        private static string ReadDictionaryString(Stream stream, long dictionaryEnd)
+        {
+            var bytes = new List<byte>();
+
+            while (stream.Position < dictionaryEnd)
+            {
+                int next = stream.ReadByte();
+                if (next < 0)
+                    throw new EndOfStreamException("Unexpected EOF while reading string from EDAT dictionary.");
+
+                if (next == 0)
+                    return Encoding.ASCII.GetString(bytes.ToArray());
+
+                bytes.Add((byte)next);
+            }
+
+            throw new InvalidDataException("Unterminated string in EDAT dictionary.");
+        }
+
+        private static void SkipLegacyV2NamePadding(Stream stream, long dictionaryEnd, bool useLegacyNamePadding, string name)
+        {
+            if (!useLegacyNamePadding || name.Length % 2 != 0)
+                return;
+
+            if (stream.Position >= dictionaryEnd)
+                throw new InvalidDataException("Expected a legacy V2 padding byte but reached end of dictionary.");
+
+            stream.Seek(1, SeekOrigin.Current);
+        }
+
+        private bool ShouldUseLegacyV2Padding(string name)
+        {
+            return _v2UsesLegacyNamePadding && name.Length % 2 == 0;
+        }
+
+        private void ValidateV2FileEntry(EdataContentFile file, long packageLength)
+        {
+            if (file.Offset < 0)
+                throw new InvalidDataException(string.Format("Invalid file offset '{0}' for '{1}'.", file.Offset, file.Path));
+
+            if (file.Size < 0)
+                throw new InvalidDataException(string.Format("Invalid file size '{0}' for '{1}'.", file.Size, file.Path));
+
+            long absoluteOffset = checked((long)Header.FileOffset + file.Offset);
+            if (absoluteOffset < 0 || absoluteOffset > packageLength)
+                throw new InvalidDataException(string.Format("File '{0}' points outside package bounds. Absolute offset={1}, package size={2}.", file.Path, absoluteOffset, packageLength));
+
+            if (file.Size > packageLength - absoluteOffset)
+                throw new InvalidDataException(string.Format("File '{0}' size exceeds package bounds. Offset={1}, size={2}, package size={3}.", file.Path, absoluteOffset, file.Size, packageLength));
         }
     }
 }

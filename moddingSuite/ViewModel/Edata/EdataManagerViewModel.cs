@@ -34,8 +34,10 @@ namespace moddingSuite.ViewModel.Edata
     public class EdataManagerViewModel : ViewModelBase
     {
         private readonly ObservableCollection<EdataFileViewModel> _openFiles = new ObservableCollection<EdataFileViewModel>();
+        private readonly ObservableCollection<string> _zzDatSearchResults = new ObservableCollection<string>();
 
         private string _statusText;
+        private string _zzDatSearchQuery = string.Empty;
 
         public string StatusText
         {
@@ -44,6 +46,16 @@ namespace moddingSuite.ViewModel.Edata
             {
                 _statusText = value;
                 OnPropertyChanged(() => StatusText);
+            }
+        }
+
+        public string ZzDatSearchQuery
+        {
+            get { return _zzDatSearchQuery; }
+            set
+            {
+                _zzDatSearchQuery = value;
+                OnPropertyChanged(() => ZzDatSearchQuery);
             }
         }
 
@@ -105,11 +117,17 @@ namespace moddingSuite.ViewModel.Edata
         public ICommand ReplaceSoundFromWorkspaceCommand { get; set; }
         public ICommand OpenEdataFromWorkspaceCommand { get; set; }
         public ICommand AddNewFileCommand { get; set; }
+        public ICommand SearchInZzDatCommand { get; set; }
 
 
         public ObservableCollection<EdataFileViewModel> OpenFiles
         {
             get { return _openFiles; }
+        }
+
+        public ObservableCollection<string> ZzDatSearchResults
+        {
+            get { return _zzDatSearchResults; }
         }
 
         public WorkspaceViewModel Workspace
@@ -139,6 +157,37 @@ namespace moddingSuite.ViewModel.Edata
             OpenFiles.Add(vm);
 
             CollectionViewSource.GetDefaultView(OpenFiles).MoveCurrentTo(vm);
+            StatusText = BuildOpenFileSummary(vm);
+        }
+
+        public void OpenNestedPackage(EdataContentFile packageFile, EdataFileViewModel ownerVm)
+        {
+            if (packageFile == null || ownerVm == null)
+                return;
+
+            try
+            {
+                byte[] packageData = ownerVm.EdataManager.GetRawData(packageFile);
+
+                string tempRoot = Path.Combine(Path.GetTempPath(), "moddingSuite", "nested_packages");
+                Directory.CreateDirectory(tempRoot);
+
+                string nestedName = Path.GetFileName(packageFile.Name);
+                if (string.IsNullOrWhiteSpace(nestedName))
+                    nestedName = string.Format("nested_{0}.dat", Guid.NewGuid().ToString("N"));
+                else if (string.IsNullOrWhiteSpace(Path.GetExtension(nestedName)))
+                    nestedName += ".dat";
+
+                string tempPackagePath = Path.Combine(tempRoot, string.Format("{0}_{1}", Guid.NewGuid().ToString("N"), nestedName));
+                File.WriteAllBytes(tempPackagePath, packageData);
+
+                AddFile(tempPackagePath);
+            }
+            catch (Exception ex)
+            {
+                StatusText = string.Format("Failed to open nested package '{0}': {1}", packageFile.Path, ex.Message);
+                Trace.TraceError("Failed to open nested package {0}: {1}", packageFile.Path, ex);
+            }
         }
 
         public void CloseFile(EdataFileViewModel vm)
@@ -181,6 +230,7 @@ namespace moddingSuite.ViewModel.Edata
             ReplaceRawFromWorkspaceCommand = new ActionCommand(ReplaceRawFromWorkspaceExecute);
             ReplaceTextureFromWorkspaceCommand = new ActionCommand(ReplaceTextureFromWorkspaceExecute, () => IsOfType(EdataFileType.Image));
             ReplaceSoundFromWorkspaceCommand = new ActionCommand(ReplaceSoundFromWorkspaceExecute, () => HasEnding(".ess"));
+            SearchInZzDatCommand = new ActionCommand(SearchInZzDatExecute);
         }
 
         private void AddNewFileExecute(object obj)
@@ -632,7 +682,14 @@ namespace moddingSuite.ViewModel.Edata
 
             var ndf = vm?.FilesCollectionView.CurrentItem as EdataContentFile;
 
-            return ndf?.FileType == type;
+            if (ndf == null)
+                return false;
+
+            var fileType = ndf.FileType;
+            if (fileType == EdataFileType.Unknown)
+                fileType = EdataManager.GetFileTypeFromFileName(ndf.Name);
+
+            return fileType == type;
         }
 
         protected bool HasEnding(string ending)
@@ -641,7 +698,7 @@ namespace moddingSuite.ViewModel.Edata
 
             var ndf = vm?.FilesCollectionView.CurrentItem as EdataContentFile;
 
-            return ndf != null && ndf.Name.EndsWith(ending);
+            return ndf != null && ndf.Name.EndsWith(ending, StringComparison.OrdinalIgnoreCase);
         }
 
         protected void EditTradFileExecute(object obj)
@@ -735,9 +792,19 @@ namespace moddingSuite.ViewModel.Edata
             if (vm == null)
                 return;
 
-            var ndf = vm.FilesCollectionView.CurrentItem as EdataContentFile;
+            var selectedFiles = vm.SelectedFiles
+                .Where(file => file != null)
+                .Distinct()
+                .ToList();
 
-            if (ndf == null)
+            if (selectedFiles.Count == 0)
+            {
+                var currentFile = vm.FilesCollectionView.CurrentItem as EdataContentFile;
+                if (currentFile != null)
+                    selectedFiles.Add(currentFile);
+            }
+
+            if (selectedFiles.Count == 0)
                 return;
 
             var dispatcher = Dispatcher.CurrentDispatcher;
@@ -750,32 +817,50 @@ namespace moddingSuite.ViewModel.Edata
                     dispatcher.Invoke(() => IsUIBusy = true);
 
                     Settings settings = SettingsManager.Load();
+                    int exported = 0;
+                    int failed = 0;
 
-                    var f = new FileInfo(ndf.Path);
-
-                    string exportFullName = Path.Combine(settings.SavePath, settings.ExportWithFullPath ? ndf.Path : f.Name);
-                    var exportDir = Path.GetDirectoryName(exportFullName);
-
-                    if (!Directory.Exists(exportDir))
-                        Directory.CreateDirectory(exportDir);
-
-                    dispatcher.Invoke(report, string.Format("Exporting to {0}...", exportFullName));
-
-                    byte[] buffer = vm.EdataManager.GetRawData(ndf);
-
-                    using (var fs = new FileStream(exportFullName, FileMode.OpenOrCreate))
+                    for (int i = 0; i < selectedFiles.Count; i++)
                     {
-                        fs.Write(buffer, 0, buffer.Length);
-                        fs.Flush();
+                        EdataContentFile file = selectedFiles[i];
+
+                        try
+                        {
+                            var f = new FileInfo(file.Path);
+                            string exportFullName = Path.Combine(settings.SavePath, settings.ExportWithFullPath ? file.Path : f.Name);
+                            var exportDir = Path.GetDirectoryName(exportFullName);
+
+                            if (!string.IsNullOrWhiteSpace(exportDir) && !Directory.Exists(exportDir))
+                                Directory.CreateDirectory(exportDir);
+
+                            dispatcher.Invoke(report, string.Format("Exporting {0} ({1}/{2})...", file.Path, i + 1, selectedFiles.Count));
+
+                            byte[] buffer = vm.EdataManager.GetRawData(file);
+
+                            using (var fs = new FileStream(exportFullName, FileMode.Create, FileAccess.Write, FileShare.None))
+                            {
+                                fs.Write(buffer, 0, buffer.Length);
+                                fs.Flush();
+                            }
+
+                            exported++;
+                        }
+                        catch (Exception ex)
+                        {
+                            failed++;
+                            Trace.TraceError("Failed to export {0}: {1}", file.Path, ex);
+                        }
                     }
+
+                    dispatcher.Invoke(report, string.Format("Export complete. Exported: {0}, failed: {1}.", exported, failed));
                 }
                 catch (Exception ex)
                 {
                     Trace.TraceError("Unhandeled exception in Thread occoured: {0}", ex.ToString());
+                    dispatcher.Invoke(report, string.Format("Export failed: {0}", ex.Message));
                 }
                 finally
                 {
-                    dispatcher.Invoke(report, "Ready");
                     dispatcher.Invoke(() => IsUIBusy = false);
                 }
             });
@@ -837,6 +922,17 @@ namespace moddingSuite.ViewModel.Edata
             {
                 settings.WargamePath = folderDlg.SelectedPath;
                 SettingsManager.Save(settings);
+
+                bool keepZzFilter = Gamespace != null && Gamespace.ShowOnlyZzDatFiles;
+                Gamespace = new GameSpaceViewModel(settings)
+                {
+                    ShowOnlyZzDatFiles = keepZzFilter
+                };
+                ZzDatSearchResults.Clear();
+                ZzDatSearchQuery = string.Empty;
+                OnPropertyChanged(() => Gamespace);
+
+                AutoLoadWarnoPackages(settings.WargamePath);
             }
         }
 
@@ -888,12 +984,15 @@ namespace moddingSuite.ViewModel.Edata
         {
             EdataFileType type;
 
-            using (var fs = new FileStream(fileName, FileMode.Open))
+            using (var fs = new FileStream(fileName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
                 var headerBuffer = new byte[12];
                 fs.Read(headerBuffer, 0, headerBuffer.Length);
 
                 type = EdataManager.GetFileTypeFromHeaderData(headerBuffer);
+
+                if (type == EdataFileType.Unknown)
+                    type = EdataManager.GetFileTypeFromFileName(fileName);
 
                 if (type == EdataFileType.Ndfbin)
                 {
@@ -912,6 +1011,409 @@ namespace moddingSuite.ViewModel.Edata
 
             if (type == EdataFileType.Package)
                 AddFile(fileName);
+        }
+
+        private static string BuildOpenFileSummary(EdataFileViewModel vm)
+        {
+            if (vm == null || vm.Files == null)
+                return "Ready";
+
+            var groupedByExtension = vm.Files
+                .Select(f => Path.GetExtension(f.Name))
+                .Select(ext => string.IsNullOrWhiteSpace(ext) ? "<noext>" : ext.ToLowerInvariant())
+                .GroupBy(ext => ext)
+                .OrderByDescending(g => g.Count())
+                .Take(5)
+                .Select(g => string.Format("{0}:{1}", g.Key, g.Count()));
+
+            return string.Format(
+                "Loaded {0} entries from {1}. Top extensions: {2}",
+                vm.Files.Count,
+                vm.HeaderText,
+                string.Join(", ", groupedByExtension));
+        }
+
+        private void SearchInZzDatExecute(object obj)
+        {
+            string query = (ZzDatSearchQuery ?? string.Empty).Trim();
+            if (query.Length < 2)
+            {
+                StatusText = "Enter at least 2 characters for ZZ DAT search.";
+                return;
+            }
+
+            string rootPath = Gamespace != null ? Gamespace.RootPath : null;
+            if (string.IsNullOrWhiteSpace(rootPath) || !Directory.Exists(rootPath))
+            {
+                StatusText = "Gamespace path does not exist. Please set your WARNO folder first.";
+                return;
+            }
+
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            Action<string> report = msg => StatusText = msg;
+
+            var searchTask = new Task(() =>
+            {
+                try
+                {
+                    dispatcher.Invoke(() =>
+                    {
+                        IsUIBusy = true;
+                        ZzDatSearchResults.Clear();
+                    });
+
+                    List<string> zzFiles = FindAllNumberedZzDatFiles(rootPath)
+                        .OrderBy(GetZzDatSortKey)
+                        .ThenBy(Path.GetDirectoryName, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+                    if (zzFiles.Count == 0)
+                    {
+                        dispatcher.Invoke(report, string.Format("No ZZ_*.dat files found under {0}.", rootPath));
+                        return;
+                    }
+
+                    int checkedFiles = 0;
+                    int failed = 0;
+                    var results = new List<string>();
+
+                    foreach (string zzFile in zzFiles)
+                    {
+                        checkedFiles++;
+                        dispatcher.Invoke(report, string.Format("Searching '{0}' in {1} ({2}/{3})...", query, Path.GetFileName(zzFile), checkedFiles, zzFiles.Count));
+
+                        try
+                        {
+                            var manager = new EdataManager(zzFile);
+                            manager.ParseEdataFile();
+
+                            var matchingPaths = manager.Files
+                                .Where(file => FileMatchesSearchQuery(file, query))
+                                .Select(file => file.Path)
+                                .Where(path => !string.IsNullOrWhiteSpace(path))
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+
+                            if (matchingPaths.Count > 0)
+                            {
+                                string relativeDatPath = GetRelativePathSafe(rootPath, zzFile);
+                                string firstMatch = matchingPaths[0];
+                                results.Add(string.Format("{0} | matches: {1} | first: {2}", relativeDatPath, matchingPaths.Count, firstMatch));
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            failed++;
+                            Trace.TraceError("Failed to search package {0}: {1}", zzFile, ex);
+                        }
+                    }
+
+                    dispatcher.Invoke(() =>
+                    {
+                        foreach (string result in results)
+                            ZzDatSearchResults.Add(result);
+                    });
+
+                    if (results.Count == 0)
+                    {
+                        dispatcher.Invoke(report, string.Format("No matches for '{0}' in {1} ZZ_*.dat files (failed: {2}).", query, zzFiles.Count, failed));
+                    }
+                    else
+                    {
+                        dispatcher.Invoke(report, string.Format(
+                            "Search '{0}' complete. Found in {1}/{2} ZZ_*.dat files (failed: {3}).",
+                            query,
+                            results.Count,
+                            zzFiles.Count,
+                            failed));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    dispatcher.Invoke(report, string.Format("ZZ DAT search failed: {0}", ex.Message));
+                    Trace.TraceError("ZZ DAT search failed under {0}: {1}", rootPath, ex);
+                }
+                finally
+                {
+                    dispatcher.Invoke(() => IsUIBusy = false);
+                }
+            });
+
+            searchTask.Start();
+        }
+
+        private void AutoLoadWarnoPackages(string rootPath)
+        {
+            if (string.IsNullOrWhiteSpace(rootPath) || !Directory.Exists(rootPath))
+                return;
+
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            Action<string> report = msg => StatusText = msg;
+
+            var scanTask = new Task(() =>
+            {
+                try
+                {
+                    dispatcher.Invoke(() => IsUIBusy = true);
+                    dispatcher.Invoke(report, string.Format("Scanning {0} for ZZ*.dat packages...", rootPath));
+
+                    List<string> zzFiles = FindZzDatFiles(rootPath)
+                        .OrderBy(GetZzDatSortKey)
+                        .ThenBy(Path.GetDirectoryName, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+                    if (zzFiles.Count == 0)
+                    {
+                        dispatcher.Invoke(report, string.Format("No ZZ*.dat files found under {0}.", rootPath));
+                        return;
+                    }
+
+                    int opened = 0;
+                    int skipped = 0;
+                    int failed = 0;
+
+                    foreach (string file in zzFiles)
+                    {
+                        bool alreadyOpen = dispatcher.Invoke(() => IsFileAlreadyOpen(file));
+                        if (alreadyOpen)
+                        {
+                            skipped++;
+                            continue;
+                        }
+
+                        dispatcher.Invoke(report, string.Format("Opening {0} ({1}/{2})...", Path.GetFileName(file), opened + skipped + failed + 1, zzFiles.Count));
+
+                        try
+                        {
+                            dispatcher.Invoke(() => HandleNewFile(file));
+                            opened++;
+                        }
+                        catch (Exception ex)
+                        {
+                            failed++;
+                            Trace.TraceError("Failed to auto-open package {0}: {1}", file, ex);
+                        }
+                    }
+
+                    dispatcher.Invoke(report, string.Format("WARNO scan complete. Found: {0}, opened: {1}, skipped: {2}, failed: {3}.", zzFiles.Count, opened, skipped, failed));
+                }
+                catch (Exception ex)
+                {
+                    dispatcher.Invoke(report, string.Format("Failed to scan WARNO directory: {0}", ex.Message));
+                    Trace.TraceError("Failed to scan WARNO directory {0}: {1}", rootPath, ex);
+                }
+                finally
+                {
+                    dispatcher.Invoke(() => IsUIBusy = false);
+                }
+            });
+
+            scanTask.Start();
+        }
+
+        private bool IsFileAlreadyOpen(string path)
+        {
+            string fullPath = Path.GetFullPath(path);
+            return OpenFiles.Any(f => string.Equals(Path.GetFullPath(f.LoadedFile), fullPath, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static IEnumerable<string> FindZzDatFiles(string rootPath)
+        {
+            List<string> directFiles = GetZzDatFilesInDirectory(rootPath);
+            if (directFiles.Count > 0)
+                return directFiles;
+
+            var directoryToFiles = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            var pending = new Stack<string>();
+            pending.Push(rootPath);
+
+            while (pending.Count > 0)
+            {
+                string current = pending.Pop();
+
+                IEnumerable<string> subDirectories = SafeEnumerateDirectories(current);
+
+                foreach (string subDirectory in subDirectories)
+                    pending.Push(subDirectory);
+
+                List<string> zzFiles = GetZzDatFilesInDirectory(current);
+                if (zzFiles.Count > 0)
+                    directoryToFiles[current] = zzFiles;
+            }
+
+            if (directoryToFiles.Count == 0)
+                return Enumerable.Empty<string>();
+
+            string selectedDirectory = directoryToFiles.Keys
+                .OrderByDescending(GetDirectoryVersionScore)
+                .ThenByDescending(GetDirectoryLastWriteUtcSafe)
+                .ThenByDescending(x => x, StringComparer.OrdinalIgnoreCase)
+                .First();
+
+            return directoryToFiles[selectedDirectory];
+        }
+
+        private static IEnumerable<string> FindAllNumberedZzDatFiles(string rootPath)
+        {
+            var matchingFiles = new List<string>();
+            var pending = new Stack<string>();
+            pending.Push(rootPath);
+
+            while (pending.Count > 0)
+            {
+                string current = pending.Pop();
+
+                foreach (string file in SafeEnumerateFiles(current, "ZZ*.dat"))
+                {
+                    if (IsNumberedZzDatFileName(Path.GetFileName(file)))
+                        matchingFiles.Add(file);
+                }
+
+                IEnumerable<string> subDirectories = SafeEnumerateDirectories(current);
+                foreach (string subDirectory in subDirectories)
+                    pending.Push(subDirectory);
+            }
+
+            return matchingFiles;
+        }
+
+        private static bool FileMatchesSearchQuery(EdataContentFile file, string query)
+        {
+            if (file == null || string.IsNullOrWhiteSpace(query))
+                return false;
+
+            return (!string.IsNullOrWhiteSpace(file.Path) && file.Path.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                   (!string.IsNullOrWhiteSpace(file.Name) && file.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static string GetRelativePathSafe(string rootPath, string fullPath)
+        {
+            try
+            {
+                return Path.GetRelativePath(rootPath, fullPath);
+            }
+            catch
+            {
+                return fullPath;
+            }
+        }
+
+        private static bool IsNumberedZzDatFileName(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+                return false;
+
+            if (!fileName.EndsWith(".dat", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string withoutExtension = Path.GetFileNameWithoutExtension(fileName);
+            if (!withoutExtension.StartsWith("ZZ_", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string suffix = withoutExtension.Substring(3);
+            return suffix.Length > 0 && suffix.All(char.IsDigit);
+        }
+
+        private static bool IsZzDatFileName(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+                return false;
+
+            if (!fileName.EndsWith(".dat", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string withoutExtension = Path.GetFileNameWithoutExtension(fileName);
+            if (string.Equals(withoutExtension, "ZZ", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (!withoutExtension.StartsWith("ZZ_", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string suffix = withoutExtension.Substring(3);
+            return suffix.Length > 0 && suffix.All(char.IsDigit);
+        }
+
+        private static int GetZzDatSortKey(string path)
+        {
+            string name = Path.GetFileNameWithoutExtension(path);
+
+            if (string.Equals(name, "ZZ", StringComparison.OrdinalIgnoreCase))
+                return -1;
+
+            if (name.StartsWith("ZZ_", StringComparison.OrdinalIgnoreCase))
+            {
+                string suffix = name.Substring(3);
+                int index;
+                if (int.TryParse(suffix, out index))
+                    return index;
+            }
+
+            return int.MaxValue;
+        }
+
+        private static List<string> GetZzDatFilesInDirectory(string directory)
+        {
+            try
+            {
+                return Directory
+                    .EnumerateFiles(directory, "ZZ*.dat", SearchOption.TopDirectoryOnly)
+                    .Where(file => IsZzDatFileName(Path.GetFileName(file)))
+                    .ToList();
+            }
+            catch
+            {
+                return new List<string>();
+            }
+        }
+
+        private static IEnumerable<string> SafeEnumerateDirectories(string directory)
+        {
+            try
+            {
+                return Directory.EnumerateDirectories(directory);
+            }
+            catch
+            {
+                return Enumerable.Empty<string>();
+            }
+        }
+
+        private static IEnumerable<string> SafeEnumerateFiles(string directory, string pattern)
+        {
+            try
+            {
+                return Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly);
+            }
+            catch
+            {
+                return Enumerable.Empty<string>();
+            }
+        }
+
+        private static int GetDirectoryVersionScore(string directory)
+        {
+            int best = int.MinValue;
+            string[] parts = directory.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string part in parts)
+            {
+                int value;
+                if (int.TryParse(part, out value))
+                    best = Math.Max(best, value);
+            }
+
+            return best;
+        }
+
+        private static DateTime GetDirectoryLastWriteUtcSafe(string directory)
+        {
+            try
+            {
+                return Directory.GetLastWriteTimeUtc(directory);
+            }
+            catch
+            {
+                return DateTime.MinValue;
+            }
         }
 
         protected void CloseFileExecute(object obj)
