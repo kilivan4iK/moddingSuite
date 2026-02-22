@@ -1,4 +1,6 @@
-Wargame modding suite  [![Donate](https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif "Shut up and take my money!")](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=XP3SV7QWZ9UEG "Shut up and take my money!")
+Wargame modding suite edited for WARNO
+
+Original author donate button ->[![Donate](https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif "Shut up and take my money!")](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=XP3SV7QWZ9UEG "Shut up and take my money!")
 ============
 
 This software brings modding to R.U.S.E, Wargame: European Escalation, Wargame: Airland Battle and Wargame: Red Dragon.
