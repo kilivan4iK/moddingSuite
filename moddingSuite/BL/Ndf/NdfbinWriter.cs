@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using K4os.Compression.LZ4;
 using moddingSuite.BL.Compressing;
 using moddingSuite.Model.Ndfbin;
 using moddingSuite.Model.Ndfbin.Types;
@@ -23,7 +24,12 @@ namespace moddingSuite.BL.Ndf
         /// <param name="compressed">Sets wether the bytecode has to be compressed or not.</param>
         public void Write(Stream outStream, NdfBinary ndf, bool compressed)
         {
-            uint compressedFlag = compressed ? 128 : 0u;
+            uint compressedFlag = 0;
+            if (compressed)
+            {
+                // Preserve WARNO-style compression when possible.
+                compressedFlag = ndf?.Header != null && ndf.Header.CompressionFlag == 1 ? 1u : 128u;
+            }
 
             outStream.Write(BitConverter.GetBytes(EugenMagic), 0, 4);
             outStream.Write(BitConverter.GetBytes((uint)0), 0, 4);
@@ -39,11 +45,23 @@ namespace moddingSuite.BL.Ndf
             if (compressed)
             {
                 outStream.Write(BitConverter.GetBytes(data.Length), 0, 4);
-                //Compressor.Comp(data, outStream);
 
-                var da = Compressor.Comp(data);
+                if (compressedFlag == 1)
+                {
+                    int maxCompressedLength = LZ4Codec.MaximumOutputSize(data.Length);
+                    var compressedData = new byte[maxCompressedLength];
+                    int written = LZ4Codec.Encode(data, 0, data.Length, compressedData, 0, compressedData.Length);
 
-                outStream.Write(da, 0, da.Length);
+                    if (written <= 0)
+                        throw new InvalidDataException("LZ4 compression failed for NDF.");
+
+                    outStream.Write(compressedData, 0, written);
+                }
+                else
+                {
+                    var da = Compressor.Comp(data);
+                    outStream.Write(da, 0, da.Length);
+                }
             }
             else
                 outStream.Write(data, 0, data.Length);

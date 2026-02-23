@@ -210,7 +210,7 @@ namespace moddingSuite.ViewModel.Edata
             ExportNdfCommand = new ActionCommand(ExportNdfExecute, () => IsOfType(EdataFileType.Ndfbin));
             ExportRawCommand = new ActionCommand(ExportRawExecute);
             ReplaceRawCommand = new ActionCommand(ReplaceRawExecute);
-            ExportTextureCommand = new ActionCommand(ExportTextureExecute, () => IsOfType(EdataFileType.Image));
+            ExportTextureCommand = new ActionCommand(ExportTextureExecute, () => IsOfType(EdataFileType.Image) || HasSelectedFileOfType(EdataFileType.Image));
             ReplaceTextureCommand = new ActionCommand(ReplaceTextureExecute, () => IsOfType(EdataFileType.Image));
 
             ExportSoundCommand = new ActionCommand(ExportSoundExecute, () => HasEnding(".ess"));
@@ -316,6 +316,7 @@ namespace moddingSuite.ViewModel.Edata
                 }
                 catch (Exception ex)
                 {
+                    dispatcher.Invoke(report, string.Format("Mesh viewer failed: {0}", ex.Message));
                     Trace.TraceError("Unhandeled exception in Thread occoured: {0}", ex.ToString());
                 }
                 finally
@@ -577,10 +578,26 @@ namespace moddingSuite.ViewModel.Edata
         {
             var vm = CollectionViewSource.GetDefaultView(OpenFiles).CurrentItem as EdataFileViewModel;
 
-            var sourceTgvFile = vm?.FilesCollectionView.CurrentItem as EdataContentFile;
-
-            if (sourceTgvFile == null)
+            if (vm == null)
                 return;
+
+            var selectedImageFiles = vm.SelectedFiles
+                .Where(IsImageFileForTextureExport)
+                .Distinct()
+                .ToList();
+
+            if (selectedImageFiles.Count == 0)
+            {
+                var currentFile = vm.FilesCollectionView.CurrentItem as EdataContentFile;
+                if (IsImageFileForTextureExport(currentFile))
+                    selectedImageFiles.Add(currentFile);
+            }
+
+            if (selectedImageFiles.Count == 0)
+            {
+                StatusText = "Select one or more .tgv texture files to export.";
+                return;
+            }
 
             var dispatcher = Dispatcher.CurrentDispatcher;
             Action<string> report = msg => StatusText = msg;
@@ -592,32 +609,59 @@ namespace moddingSuite.ViewModel.Edata
                     dispatcher.Invoke(() => IsUIBusy = true);
 
                     Settings settings = SettingsManager.Load();
-
-                    var f = new FileInfo(sourceTgvFile.Path);
-                    var exportPath = Path.Combine(settings.SavePath, f.Name + ".dds");
-
-                    dispatcher.Invoke(report, string.Format("Exporting to {0}...", exportPath));
+                    int exported = 0;
+                    int failed = 0;
+                    string firstFailure = null;
 
                     var tgvReader = new TgvReader();
-                    var tgv = tgvReader.Read(vm.EdataManager.GetRawData(sourceTgvFile));
-
                     var writer = new TgvDDSWriter();
 
-                    byte[] content = writer.CreateDDSFile(tgv);
-
-                    using (var fs = new FileStream(Path.Combine(settings.SavePath, f.Name + ".dds"), FileMode.OpenOrCreate))
+                    for (int i = 0; i < selectedImageFiles.Count; i++)
                     {
-                        fs.Write(content, 0, content.Length);
-                        fs.Flush();
+                        EdataContentFile sourceTgvFile = selectedImageFiles[i];
+
+                        try
+                        {
+                            var f = new FileInfo(sourceTgvFile.Path);
+                            var exportPath = Path.Combine(settings.SavePath, f.Name + ".dds");
+                            var exportDir = Path.GetDirectoryName(exportPath);
+                            if (!string.IsNullOrWhiteSpace(exportDir) && !Directory.Exists(exportDir))
+                                Directory.CreateDirectory(exportDir);
+
+                            dispatcher.Invoke(report, string.Format("Exporting texture {0} ({1}/{2})...", sourceTgvFile.Path, i + 1, selectedImageFiles.Count));
+
+                            var tgv = tgvReader.Read(vm.EdataManager.GetRawData(sourceTgvFile));
+                            byte[] content = writer.CreateDDSFile(tgv);
+
+                            using (var fs = new FileStream(exportPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                            {
+                                fs.Write(content, 0, content.Length);
+                                fs.Flush();
+                            }
+
+                            exported++;
+                        }
+                        catch (Exception fileEx)
+                        {
+                            failed++;
+                            if (string.IsNullOrWhiteSpace(firstFailure))
+                                firstFailure = string.Format("{0}: {1}", sourceTgvFile.Path, fileEx.Message);
+                            Trace.TraceError("Texture export failed for {0}: {1}", sourceTgvFile.Path, fileEx);
+                        }
                     }
+
+                    if (failed > 0 && !string.IsNullOrWhiteSpace(firstFailure))
+                        dispatcher.Invoke(report, string.Format("Texture export complete. Exported: {0}, failed: {1}. First error: {2}", exported, failed, firstFailure));
+                    else
+                        dispatcher.Invoke(report, string.Format("Texture export complete. Exported: {0}, failed: {1}.", exported, failed));
                 }
                 catch (Exception ex)
                 {
+                    dispatcher.Invoke(report, string.Format("Texture export failed: {0}", ex.Message));
                     Trace.TraceError("Unhandeled exception in Thread occoured: {0}", ex.ToString());
                 }
                 finally
                 {
-                    dispatcher.Invoke(report, "Ready");
                     dispatcher.Invoke(() => IsUIBusy = false);
                 }
             });
@@ -692,6 +736,25 @@ namespace moddingSuite.ViewModel.Edata
             return fileType == type;
         }
 
+        protected bool HasSelectedFileOfType(EdataFileType type)
+        {
+            var vm = CollectionViewSource.GetDefaultView(OpenFiles).CurrentItem as EdataFileViewModel;
+            if (vm == null || vm.SelectedFiles == null || vm.SelectedFiles.Count == 0)
+                return false;
+
+            return vm.SelectedFiles.Any(file =>
+            {
+                if (file == null)
+                    return false;
+
+                var fileType = file.FileType;
+                if (fileType == EdataFileType.Unknown)
+                    fileType = EdataManager.GetFileTypeFromFileName(file.Name);
+
+                return fileType == type;
+            });
+        }
+
         protected bool HasEnding(string ending)
         {
             var vm = CollectionViewSource.GetDefaultView(OpenFiles).CurrentItem as EdataFileViewModel;
@@ -699,6 +762,22 @@ namespace moddingSuite.ViewModel.Edata
             var ndf = vm?.FilesCollectionView.CurrentItem as EdataContentFile;
 
             return ndf != null && ndf.Name.EndsWith(ending, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsImageFileForTextureExport(EdataContentFile file)
+        {
+            if (file == null)
+                return false;
+
+            var fileType = file.FileType;
+            if (fileType == EdataFileType.Unknown)
+                fileType = EdataManager.GetFileTypeFromFileName(file.Name);
+
+            if (fileType == EdataFileType.Image)
+                return true;
+
+            return !string.IsNullOrWhiteSpace(file.Name) &&
+                   file.Name.EndsWith(".tgv", StringComparison.OrdinalIgnoreCase);
         }
 
         protected void EditTradFileExecute(object obj)

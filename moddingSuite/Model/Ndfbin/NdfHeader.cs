@@ -17,6 +17,7 @@ namespace moddingSuite.Model.Ndfbin
     public class NdfHeader : ViewModelBase
     {
         private bool _isCompressedBody;
+        private uint _compressionFlag;
 
         public bool IsCompressedBody
         {
@@ -25,6 +26,16 @@ namespace moddingSuite.Model.Ndfbin
             {
                 _isCompressedBody = value;
                 OnPropertyChanged(() => IsCompressedBody);
+            }
+        }
+
+        public uint CompressionFlag
+        {
+            get { return _compressionFlag; }
+            set
+            {
+                _compressionFlag = value;
+                OnPropertyChanged(() => CompressionFlag);
             }
         }
         public ulong FooterOffset { get; set; }

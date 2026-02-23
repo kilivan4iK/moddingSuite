@@ -67,8 +67,9 @@ namespace moddingSuite.BL.TGV
                 file.Sizes.Add(offset);
             }
 
+            long mipDataBase = ms.Position;
             for (int i = 0; i < file.MipMapCount; i++)
-                file.MipMaps.Add(ReadMip(ms, file, i));
+                file.MipMaps.Add(ReadMip(ms, file, i, mipDataBase));
 
             file.Format = TranslatePixelFormat(file.PixelFormatStr);
 
@@ -163,43 +164,194 @@ namespace moddingSuite.BL.TGV
         /// <param name="file"></param>
         /// <param name="id"></param>
         /// <returns></returns>
-        private TgvMipMap ReadMip(Stream ms, TgvFile file, int id)
+        private TgvMipMap ReadMip(Stream ms, TgvFile file, int id, long mipDataBase)
         {
-            if (id > file.MipMapCount)
+            if (id < 0 || id >= file.MipMapCount)
                 throw new ArgumentException("id");
 
-            var zipo = new byte[] { 0x5A, 0x49, 0x50, 0x4F };
+            uint rawOffset = file.Offsets[id];
+            uint rawSize = file.Sizes[id];
 
-            var mipMap = new TgvMipMap(file.Offsets[id], file.Sizes[id], 0);
+            long absoluteOffset = rawOffset;
+            long relativeOffset = mipDataBase + rawOffset;
+            bool hasRelativeCandidate = relativeOffset != absoluteOffset;
 
-            byte[] buffer;
+            Exception lastError = null;
 
-            if (file.IsCompressed)
+            for (int attempt = 0; attempt < (hasRelativeCandidate ? 2 : 1); attempt++)
             {
-                buffer = new byte[4];
+                long candidateOffset = attempt == 0 ? absoluteOffset : relativeOffset;
 
-                ms.Read(buffer, 0, buffer.Length);
-                if (!Utils.ByteArrayCompare(buffer, zipo))
-                    throw new InvalidDataException("Mipmap has to start with \"ZIPO\"!");
+                if (candidateOffset < 0 || candidateOffset >= ms.Length)
+                    continue;
 
-                ms.Read(buffer, 0, buffer.Length);
-                mipMap.MipWidth = BitConverter.ToInt32(buffer, 0);
+                long available = ms.Length - candidateOffset;
+                int bytesToRead = (int)Math.Min((long)rawSize, available);
+                if (bytesToRead <= 0)
+                    continue;
 
-                buffer = new byte[mipMap.Size - 8];
+                ms.Seek(candidateOffset, SeekOrigin.Begin);
+                var chunk = new byte[bytesToRead];
+                ms.Read(chunk, 0, chunk.Length);
+
+                try
+                {
+                    return ParseMipChunk(file, id, rawOffset, rawSize, chunk);
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                }
             }
-            else
-                buffer = new byte[mipMap.Size];
 
-            ms.Read(buffer, 0, buffer.Length);
+            throw new InvalidDataException(
+                string.Format("Could not decode mip {0} (offset {1}, size {2}).", id, rawOffset, rawSize),
+                lastError);
+        }
 
-            ms.Seek(Utils.RoundToNextDivBy4((int)mipMap.Size)-mipMap.Size, SeekOrigin.Current);
+        private TgvMipMap ParseMipChunk(TgvFile file, int id, uint rawOffset, uint rawSize, byte[] chunk)
+        {
+            var mipMap = new TgvMipMap(rawOffset, rawSize, 0);
 
-            if (file.IsCompressed)
-                buffer = Compressor.Decomp(buffer);
+            if (!file.IsCompressed)
+            {
+                mipMap.Content = chunk;
+                return mipMap;
+            }
 
-            mipMap.Content = buffer;
+            byte[] decodedContent;
+            int mipWidth;
 
+            if (!TryDecodeCompressedChunk(file, id, chunk, out decodedContent, out mipWidth))
+                throw new InvalidDataException("Unable to decode compressed mip chunk.");
+
+            mipMap.MipWidth = mipWidth;
+            mipMap.Content = decodedContent;
             return mipMap;
+        }
+
+        private bool TryDecodeCompressedChunk(TgvFile file, int id, byte[] chunk, out byte[] decodedContent, out int mipWidth)
+        {
+            decodedContent = null;
+            mipWidth = GetFallbackMipWidth(file, id);
+
+            if (chunk.Length >= 8 && IsZstdMarker(chunk))
+            {
+                int declaredSize = BitConverter.ToInt32(chunk, 4);
+                if (TryDecompressZstdPayload(chunk, 8, declaredSize, out decodedContent))
+                    return true;
+            }
+
+            // Some variants can store a raw ZSTD frame without an explicit marker.
+            if (IsZstdFrame(chunk, 0) && TryDecompressZstdPayload(chunk, 0, 0, out decodedContent))
+                return true;
+
+            if (chunk.Length >= 8 && IsZipoMarker(chunk))
+            {
+                int zipoMipWidth = BitConverter.ToInt32(chunk, 4);
+                if (TryDecompressPayload(chunk, 8, out decodedContent))
+                {
+                    mipWidth = zipoMipWidth > 0 ? zipoMipWidth : mipWidth;
+                    return true;
+                }
+            }
+
+            // WARNO can contain chunks without the ZIPO preamble.
+            if (TryDecompressPayload(chunk, 0, out decodedContent))
+                return true;
+
+            // Fallback for chunks that still use an 8-byte preamble with non-ZIPO marker.
+            if (chunk.Length > 8 && TryDecompressPayload(chunk, 8, out decodedContent))
+                return true;
+
+            return false;
+        }
+
+        private bool IsZipoMarker(byte[] chunk)
+        {
+            return chunk.Length >= 4 &&
+                   chunk[0] == 0x5A &&
+                   chunk[1] == 0x49 &&
+                   chunk[2] == 0x50 &&
+                   chunk[3] == 0x4F;
+        }
+
+        private bool IsZstdMarker(byte[] chunk)
+        {
+            return chunk.Length >= 4 &&
+                   chunk[0] == 0x5A &&
+                   chunk[1] == 0x53 &&
+                   chunk[2] == 0x54 &&
+                   chunk[3] == 0x44;
+        }
+
+        private bool IsZstdFrame(byte[] chunk, int offset)
+        {
+            return offset >= 0 &&
+                   chunk.Length >= offset + 4 &&
+                   chunk[offset] == 0x28 &&
+                   chunk[offset + 1] == 0xB5 &&
+                   chunk[offset + 2] == 0x2F &&
+                   chunk[offset + 3] == 0xFD;
+        }
+
+        private bool TryDecompressZstdPayload(byte[] chunk, int payloadOffset, int declaredSize, out byte[] content)
+        {
+            content = null;
+
+            if (payloadOffset < 0 || payloadOffset >= chunk.Length)
+                return false;
+
+            try
+            {
+                int payloadLength = chunk.Length - payloadOffset;
+                var payload = new byte[payloadLength];
+                Buffer.BlockCopy(chunk, payloadOffset, payload, 0, payloadLength);
+
+                using (var decompressor = new ZstdSharp.Decompressor())
+                    content = decompressor.Unwrap(payload).ToArray();
+
+                if (content == null || content.Length == 0)
+                    return false;
+
+                // Keep the data even if the size field is zero or mismatched.
+                if (declaredSize > 0 && content.Length != declaredSize)
+                    return true;
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool TryDecompressPayload(byte[] chunk, int payloadOffset, out byte[] content)
+        {
+            content = null;
+
+            if (payloadOffset < 0 || payloadOffset >= chunk.Length)
+                return false;
+
+            try
+            {
+                int payloadLength = chunk.Length - payloadOffset;
+                var payload = new byte[payloadLength];
+                Buffer.BlockCopy(chunk, payloadOffset, payload, 0, payloadLength);
+
+                content = moddingSuite.BL.Compressing.Compressor.Decomp(payload);
+                return content != null && content.Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private int GetFallbackMipWidth(TgvFile file, int id)
+        {
+            int mipWidth = (int)(file.ImageWidth >> id);
+            return Math.Max(1, mipWidth);
         }
 
         protected PixelFormats TranslatePixelFormat(string pixelFormat)
@@ -211,6 +363,11 @@ namespace moddingSuite.BL.TGV
                 case "A8R8G8B8_LIN_HDR":
                 case "A8R8G8B8":
                     return PixelFormats.R8G8B8A8_UNORM;
+                case "A8B8G8R8":
+                case "A8B8G8R8_LIN":
+                    return PixelFormats.B8G8R8A8_UNORM;
+                case "A8B8G8R8_SRGB":
+                    return PixelFormats.B8G8R8A8_UNORM_SRGB;
                 case "X8R8G8B8":
                 case "X8R8G8B8_LE":
                     return PixelFormats.B8G8R8X8_UNORM;
@@ -257,22 +414,40 @@ namespace moddingSuite.BL.TGV
 
                 case "DXT1":
                 case "DXT1_LIN":
+                case "BC1":
+                case "BC1_LIN":
                     return PixelFormats.BC1_UNORM;
                 case "DXT1_SRGB":
+                case "BC1_SRGB":
                     return PixelFormats.BC1_UNORM_SRGB;
                 case "DXT2":
                 case "DXT3":
                 case "DXT3_LIN":
+                case "BC2":
+                case "BC2_LIN":
                     return PixelFormats.BC2_UNORM;
                 case "DXT3_SRGB":
+                case "BC2_SRGB":
                     return PixelFormats.BC2_UNORM_SRGB;
                 case "DXT4":
                 case "DXT5":
                 case "DXT5_LIN":
                 case "DXT5_FROM_ENCODE":
+                case "BC3":
+                case "BC3_LIN":
                     return PixelFormats.BC3_UNORM;
                 case "DXT5_SRGB":
+                case "BC3_SRGB":
                     return PixelFormats.BC3_UNORM_SRGB;
+                case "BC5":
+                case "BC5_LIN":
+                case "BC5_SRGB":
+                    return PixelFormats.BC5_UNORM;
+                case "BC7":
+                case "BC7_LIN":
+                    return PixelFormats.BC7_UNORM;
+                case "BC7_SRGB":
+                    return PixelFormats.BC7_UNORM_SRGB;
 
                 case "R5G6B5_LIN":
                 case "R5G6B5":

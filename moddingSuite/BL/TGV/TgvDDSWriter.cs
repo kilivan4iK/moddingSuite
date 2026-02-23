@@ -21,7 +21,14 @@ namespace moddingSuite.BL.TGV
                 buffer = CreateDDSHeader(file);
                 ms.Write(buffer, 0, buffer.Length);
 
-                buffer = file.MipMaps.OrderByDescending(x => x.MipWidth).First().Content;
+                // WARNO textures can store mip entries in reverse order.
+                // Pick the mip with the largest payload to ensure full-resolution export.
+                buffer = file.MipMaps
+                    .Where(x => x.Content != null && x.Content.Length > 0)
+                    .OrderByDescending(x => x.Content.Length)
+                    .ThenByDescending(x => x.MipWidth)
+                    .Select(x => x.Content)
+                    .FirstOrDefault() ?? Array.Empty<byte>();
                 ms.Write(buffer, 0, buffer.Length);
 
                 return ms.ToArray();

@@ -55,11 +55,16 @@ namespace moddingSuite.ViewModel.Mesh
         {
             MeshFile = file;
 
-            EditTextureBindingsCommand = new ActionCommand(EditTextureBindingsExecute);
+            EditTextureBindingsCommand = new ActionCommand(
+                EditTextureBindingsExecute,
+                () => MeshFile != null && MeshFile.TextureBindings != null);
         }
 
         private void EditTextureBindingsExecute(object obj)
         {
+            if (MeshFile == null || MeshFile.TextureBindings == null)
+                return;
+
             var ndfEditor = new NdfEditorMainViewModel(MeshFile.TextureBindings);
 
             DialogProvider.ProvideView(ndfEditor, this);

@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using K4os.Compression.LZ4;
 using moddingSuite.Model.Ndfbin.Types;
 using moddingSuite.Model.Ndfbin.Types.AllTypes;
 
@@ -20,32 +21,9 @@ namespace moddingSuite.BL.Ndf
             using (var ms = new MemoryStream(data))
             {
                 ndf.Header = ReadHeader(ms);
-
-                if (ndf.Header.IsCompressedBody)
-                {
-                    using (var uncompStream = new MemoryStream())
-                    {
-                        ms.Seek(0, SeekOrigin.Begin);
-                        var headBuffer = new byte[ndf.Header.HeaderSize];
-                        ms.Read(headBuffer, 0, headBuffer.Length);
-                        uncompStream.Write(headBuffer, 0, headBuffer.Length);
-
-                        ms.Seek((long)ndf.Header.HeaderSize, SeekOrigin.Begin);
-
-                        var buffer = new byte[4];
-                        ms.Read(buffer, 0, buffer.Length);
-                        uint compressedblocklen = BitConverter.ToUInt32(buffer, 0);
-
-                        var contentBuffer = new byte[(ulong)(data.Length) - ndf.Header.HeaderSize];
-                        ms.Read(contentBuffer, 0, contentBuffer.Length);
-
-                        var da = Compressor.Decomp(contentBuffer);
-                        uncompStream.Write(da, 0, da.Length);
-
-                        data = uncompStream.ToArray();
-                    }
-                }
             }
+
+            data = DecompressBodyIfNeeded(data, ndf.Header);
 
             using (var ms = new MemoryStream(data))
             {
@@ -72,35 +50,91 @@ namespace moddingSuite.BL.Ndf
             using (var ms = new MemoryStream(data))
             {
                 var header = ReadHeader(ms);
-
-                if (header.IsCompressedBody)
-                {
-                    using (var uncompStream = new MemoryStream())
-                    {
-                        ms.Seek(0, SeekOrigin.Begin);
-                        var headBuffer = new byte[header.HeaderSize];
-                        ms.Read(headBuffer, 0, headBuffer.Length);
-                        uncompStream.Write(headBuffer, 0, headBuffer.Length);
-
-                        ms.Seek((long)header.HeaderSize, SeekOrigin.Begin);
-
-                        var buffer = new byte[4];
-                        ms.Read(buffer, 0, buffer.Length);
-                        uint compressedblocklen = BitConverter.ToUInt32(buffer, 0);
-
-                        var contentBuffer = new byte[(ulong)(data.Length) - header.HeaderSize];
-                        ms.Read(contentBuffer, 0, contentBuffer.Length);
-                        //Compressor.Decomp(contentBuffer, uncompStream);
-                        var da = Compressor.Decomp(contentBuffer);
-
-                        uncompStream.Write(da, 0, da.Length);
-
-                        data = uncompStream.ToArray();
-                    }
-                }
+                data = DecompressBodyIfNeeded(data, header);
             }
 
             return data;
+        }
+
+        private byte[] DecompressBodyIfNeeded(byte[] data, NdfHeader header)
+        {
+            if (header == null || !header.IsCompressedBody)
+                return data;
+
+            if (header.HeaderSize > (ulong)data.Length)
+                throw new InvalidDataException("Invalid NDF header size.");
+
+            using (var ms = new MemoryStream(data))
+            {
+                using (var uncompStream = new MemoryStream())
+                {
+                    ms.Seek(0, SeekOrigin.Begin);
+
+                    int headerSize = checked((int)header.HeaderSize);
+                    var headBuffer = new byte[headerSize];
+                    ms.Read(headBuffer, 0, headBuffer.Length);
+                    uncompStream.Write(headBuffer, 0, headBuffer.Length);
+
+                    ms.Seek((long)header.HeaderSize, SeekOrigin.Begin);
+
+                    var buffer = new byte[4];
+                    ms.Read(buffer, 0, buffer.Length);
+                    int expectedBodySize = BitConverter.ToInt32(buffer, 0);
+
+                    int compressedPayloadLength = checked((int)(ms.Length - ms.Position));
+                    if (compressedPayloadLength < 0)
+                        throw new InvalidDataException("Invalid compressed NDF payload length.");
+
+                    var compressedPayload = new byte[compressedPayloadLength];
+                    ms.Read(compressedPayload, 0, compressedPayload.Length);
+
+                    byte[] uncompressedBody = DecompressBodyPayload(compressedPayload, expectedBodySize, header.CompressionFlag);
+
+                    uncompStream.Write(uncompressedBody, 0, uncompressedBody.Length);
+
+                    return uncompStream.ToArray();
+                }
+            }
+        }
+
+        private byte[] DecompressBodyPayload(byte[] compressedPayload, int expectedBodySize, uint compressionFlag)
+        {
+            switch (compressionFlag)
+            {
+                case 1:
+                    return DecompressLz4(compressedPayload, expectedBodySize);
+                case 128:
+                    return Compressor.Decomp(compressedPayload);
+                default:
+                    // Fallback for unknown variants: try legacy zlib first, then WARNO LZ4.
+                    try
+                    {
+                        return Compressor.Decomp(compressedPayload);
+                    }
+                    catch
+                    {
+                        return DecompressLz4(compressedPayload, expectedBodySize);
+                    }
+            }
+        }
+
+        private byte[] DecompressLz4(byte[] compressedPayload, int expectedBodySize)
+        {
+            if (expectedBodySize <= 0)
+                throw new InvalidDataException("Invalid expected LZ4 body size.");
+
+            var output = new byte[expectedBodySize];
+            int decodedLength = LZ4Codec.Decode(compressedPayload, 0, compressedPayload.Length, output, 0, output.Length);
+
+            if (decodedLength <= 0)
+                throw new InvalidDataException("LZ4 decompression failed.");
+
+            if (decodedLength == expectedBodySize)
+                return output;
+
+            var trimmed = new byte[decodedLength];
+            Buffer.BlockCopy(output, 0, trimmed, 0, decodedLength);
+            return trimmed;
         }
 
         /// <summary>
@@ -118,17 +152,26 @@ namespace moddingSuite.BL.Ndf
                 throw new InvalidDataException("No EUG0 found on top of this file!");
 
             ms.Read(buffer, 0, buffer.Length);
+            uint cndfOrReserved = BitConverter.ToUInt32(buffer, 0);
 
-            if (BitConverter.ToUInt32(buffer, 0) != 0)
-                throw new InvalidDataException("Bytes between EUG0 and CNDF have to be 0");
+            uint cndf;
+            if (cndfOrReserved == 1178881603)
+            {
+                cndf = cndfOrReserved;
+            }
+            else
+            {
+                // WARNO uses a non-zero reserved field between EUG0 and CNDF.
+                ms.Read(buffer, 0, buffer.Length);
+                cndf = BitConverter.ToUInt32(buffer, 0);
+            }
 
-            ms.Read(buffer, 0, buffer.Length);
-
-            if (BitConverter.ToUInt32(buffer, 0) != 1178881603)
+            if (cndf != 1178881603)
                 throw new InvalidDataException("No CNDF (Compiled NDF)!");
 
             ms.Read(buffer, 0, buffer.Length);
-            header.IsCompressedBody = BitConverter.ToInt32(buffer, 0) == 128;
+            header.CompressionFlag = BitConverter.ToUInt32(buffer, 0);
+            header.IsCompressedBody = header.CompressionFlag != 0;
 
             buffer = new byte[8];
 
