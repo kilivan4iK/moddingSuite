@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using moddingSuite.BL.Ndf;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 {
@@ -11,7 +12,7 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override string ToString()
         {
-            return "null";
+            return "nil";
         }
 
         public override byte[] GetBytes()
@@ -21,7 +22,7 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            return NdfTextWriter.NdfTextEncoding.GetBytes("nil");
         }
     }
 }

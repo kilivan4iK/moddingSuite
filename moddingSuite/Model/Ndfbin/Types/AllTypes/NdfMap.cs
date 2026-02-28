@@ -121,13 +121,20 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
             var data = new List<byte>();
 
             data.AddRange(end.GetBytes("(\n"));
-
-
-            data.AddRange((Key).Value.GetNdfText());
+            if (Key != null && Key.Value != null)
+                data.AddRange(Key.Value.GetNdfText());
+            else
+                data.AddRange(end.GetBytes("nil"));
 
             data.AddRange(end.GetBytes(",\n"));
 
+            var mapValue = Value as MapValueHolder;
+            if (mapValue != null && mapValue.Value != null)
+                data.AddRange(mapValue.Value.GetNdfText());
+            else
+                data.AddRange(end.GetBytes("nil"));
 
+            data.AddRange(end.GetBytes("\n"));
             data.AddRange(end.GetBytes(")\n"));
 
             return data.ToArray();

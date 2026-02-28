@@ -4,6 +4,7 @@ using System.IO;
 using System.Windows.Input;
 using moddingSuite.BL;
 using moddingSuite.BL.Compressing;
+using moddingSuite.BL.Ndf;
 using moddingSuite.ViewModel.Base;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
@@ -172,7 +173,8 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            int length = Value is byte[] bytes ? bytes.Length : 0;
+            return NdfTextWriter.NdfTextEncoding.GetBytes(string.Format("BLOB<{0}>", length));
         }
         /*private float getHalfFloat(byte[] bytes){
             

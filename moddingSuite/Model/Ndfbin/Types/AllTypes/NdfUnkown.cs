@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using moddingSuite.BL.Ndf;
 using moddingSuite.Util;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
@@ -12,17 +13,17 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetBytes()
         {
-            throw  new InvalidOperationException("Cant serialize ndfunknown.");
+            throw new InvalidOperationException("Cant serialize ndfunknown.");
         }
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            return NdfTextWriter.NdfTextEncoding.GetBytes(string.Format("UNKNOWN(0x{0})", ToString()));
         }
 
         public override string ToString()
         {
-            return string.Format("{0}", Utils.ByteArrayToBigEndianHexByteString((byte[]) Value));
+            return string.Format("{0}", Utils.ByteArrayToBigEndianHexByteString((byte[])Value));
         }
     }
 }

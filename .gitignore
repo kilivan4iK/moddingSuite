@@ -217,3 +217,26 @@ pip-log.txt
 .mr.developer.cfg
 /moddingSuite/View/Ndfbin/Viewer/DamageTableView.xaml.cs
 /moddingSuite/ViewModel/Ndf/DamageTableViewModel.cs
+
+#############
+## Local workspace / reverse-engineering artifacts
+#############
+
+# Local Codex temp/work dirs
+/.codex_tmp/
+
+# Local .NET SDK bootstrap folder (do not commit)
+/.dotnet/
+/dotnet/
+
+# Generated release/output artifacts
+/artifacts/
+
+# Local research / extracted data (not source code)
+/ndfbin/
+/ndf-parse-main/
+
+# Keep only bundled QuickBMS in tools/
+/tools/*
+!/tools/quickbms_win/
+!/tools/quickbms_win/**

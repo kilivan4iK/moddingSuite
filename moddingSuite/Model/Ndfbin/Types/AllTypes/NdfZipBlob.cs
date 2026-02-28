@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using moddingSuite.BL.Ndf;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 {
@@ -26,7 +27,8 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            int length = Value is byte[] bytes ? bytes.Length : 0;
+            return NdfTextWriter.NdfTextEncoding.GetBytes(string.Format("ZIPBLOB<{0}>", length));
         }
     }
 }

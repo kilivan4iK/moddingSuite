@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using moddingSuite.BL.Ndf;
 using moddingSuite.Util;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
@@ -31,7 +32,7 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            return NdfTextWriter.NdfTextEncoding.GetBytes(string.Format("0x{0}", ToString()));
         }
 
         public override string ToString()

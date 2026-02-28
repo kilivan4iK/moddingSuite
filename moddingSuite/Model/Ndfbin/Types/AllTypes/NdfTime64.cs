@@ -1,8 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System;
+using moddingSuite.BL.Ndf;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 {
@@ -25,7 +22,8 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            var dateTime = (DateTime)Value;
+            return NdfTextWriter.NdfTextEncoding.GetBytes(string.Format("TIME64(\"{0:O}\")", dateTime));
         }
     }
 }

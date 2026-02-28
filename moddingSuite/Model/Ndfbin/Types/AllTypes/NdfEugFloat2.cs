@@ -1,8 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Globalization;
+using moddingSuite.BL.Ndf;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 {
@@ -36,12 +35,17 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            string text = string.Format(
+                CultureInfo.InvariantCulture,
+                "({0}, {1})",
+                Convert.ToSingle(Value),
+                Value2);
+            return NdfTextWriter.NdfTextEncoding.GetBytes(text);
         }
 
         public override string ToString()
         {
-            return string.Format("Float pair: {0} : {1}", Value, Value2);
+            return string.Format(CultureInfo.InvariantCulture, "Float pair: {0} : {1}", Value, Value2);
         }
     }
 }

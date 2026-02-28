@@ -235,14 +235,20 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
                 byte[] buffer = enc.GetBytes("[\n");
                 ms.Write(buffer, 0, buffer.Length);
 
-                foreach (CollectionItemValueHolder collectionItemValueHolder in InnerList)
+                for (int i = 0; i < InnerList.Count; i++)
                 {
-                    buffer = collectionItemValueHolder.Value.GetNdfText();
-                    ms.Write(buffer, 0, buffer.Length);
+                    CollectionItemValueHolder collectionItemValueHolder = InnerList[i];
+                    byte[] itemBuffer = collectionItemValueHolder.Value.GetNdfText();
+                    ms.Write(itemBuffer, 0, itemBuffer.Length);
 
-                    if (InnerList.IndexOf(collectionItemValueHolder) < InnerList.Count)
+                    if (i < InnerList.Count - 1)
                     {
                         buffer = enc.GetBytes(",\n");
+                        ms.Write(buffer, 0, buffer.Length);
+                    }
+                    else if (!EndsWithLineBreak(itemBuffer))
+                    {
+                        buffer = enc.GetBytes("\n");
                         ms.Write(buffer, 0, buffer.Length);
                     }
                 }
@@ -252,6 +258,30 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
                 return ms.ToArray();
             }
+        }
+
+        private static bool EndsWithLineBreak(byte[] data)
+        {
+            if (data == null || data.Length == 0)
+                return false;
+
+            int len = data.Length;
+            if (data[len - 1] == (byte)'\n')
+                return true;
+
+            if (data[len - 1] == 0 && len >= 2 && data[len - 2] == (byte) '\n')
+                return true;
+
+            if (data.Length >= 4 &&
+                data[len - 4] == (byte) '\r' &&
+                data[len - 3] == 0 &&
+                data[len - 2] == (byte) '\n' &&
+                data[len - 1] == 0)
+            {
+                return true;
+            }
+
+            return false;
         }
     }
 }

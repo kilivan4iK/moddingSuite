@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Globalization;
 using moddingSuite.BL;
 using moddingSuite.BL.Ndf;
 
@@ -28,12 +29,12 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override string ToString()
         {
-            return string.Format("{0:0.####################}", Value);
+            return string.Format(CultureInfo.InvariantCulture, "{0:0.####################}", Value);
         }
 
         public override byte[] GetNdfText()
         {
-            return NdfTextWriter.NdfTextEncoding.GetBytes(Value.ToString());
+            return NdfTextWriter.NdfTextEncoding.GetBytes(Value.ToString(CultureInfo.InvariantCulture));
         }
     }
 }

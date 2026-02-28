@@ -26,6 +26,8 @@ using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using moddingSuite.BL.Ess;
+using moddingSuite.BL.Edata;
+using moddingSuite.BL.Edata.Model;
 using moddingSuite.BL.TGV;
 using moddingSuite.BL.Mesh;
 
@@ -35,9 +37,27 @@ namespace moddingSuite.ViewModel.Edata
     {
         private readonly ObservableCollection<EdataFileViewModel> _openFiles = new ObservableCollection<EdataFileViewModel>();
         private readonly ObservableCollection<string> _zzDatSearchResults = new ObservableCollection<string>();
+        private readonly ObservableCollection<VirtualNodeViewModel> _unifiedZzRootNodes = new ObservableCollection<VirtualNodeViewModel>();
+        private readonly ObservableCollection<VirtualNodeViewModel> _selectedUnifiedZzNodes = new ObservableCollection<VirtualNodeViewModel>();
+        private readonly ZzDatDiscoveryService _zzDatDiscoveryService = new ZzDatDiscoveryService();
+        private readonly UnifiedZzIndexService _unifiedZzIndexService = new UnifiedZzIndexService(new UnifiedZzMergeService());
+        private readonly UnifiedZzExportService _unifiedZzExportService = new UnifiedZzExportService();
+        private readonly QuickBmsEdatExtractorService _quickBmsEdatExtractorService = new QuickBmsEdatExtractorService();
+        private readonly WarnoDatSnapshotResolver _warnoDatSnapshotResolver = new WarnoDatSnapshotResolver();
+        private readonly ExternalNdfbinToolDiagnosticsService _externalNdfbinToolDiagnosticsService = new ExternalNdfbinToolDiagnosticsService();
 
         private string _statusText;
         private string _zzDatSearchQuery = string.Empty;
+        private string _unifiedZzStatusText = string.Empty;
+        private VirtualNodeViewModel _selectedUnifiedZzNode;
+        private IReadOnlyList<UnifiedZzEntry> _unifiedZzEntries = Array.Empty<UnifiedZzEntry>();
+        private bool _isUnifiedZzLoaded;
+        private bool _isUnifiedZzBusy;
+        private bool _isExtractInProgress;
+        private int _extractProcessedCount;
+        private int _extractTotalCount;
+        private double _extractPercent;
+        private string _extractProgressText = "Idle";
 
         public string StatusText
         {
@@ -59,9 +79,114 @@ namespace moddingSuite.ViewModel.Edata
             }
         }
 
+        public ObservableCollection<VirtualNodeViewModel> UnifiedZzRootNodes
+        {
+            get { return _unifiedZzRootNodes; }
+        }
+
+        public ObservableCollection<VirtualNodeViewModel> SelectedUnifiedZzNodes
+        {
+            get { return _selectedUnifiedZzNodes; }
+        }
+
+        public VirtualNodeViewModel SelectedUnifiedZzNode
+        {
+            get { return _selectedUnifiedZzNode; }
+            set
+            {
+                _selectedUnifiedZzNode = value;
+                OnPropertyChanged(() => SelectedUnifiedZzNode);
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        public bool IsUnifiedZzLoaded
+        {
+            get { return _isUnifiedZzLoaded; }
+            set
+            {
+                _isUnifiedZzLoaded = value;
+                OnPropertyChanged(() => IsUnifiedZzLoaded);
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        public string UnifiedZzStatusText
+        {
+            get { return _unifiedZzStatusText; }
+            set
+            {
+                _unifiedZzStatusText = value;
+                OnPropertyChanged(() => UnifiedZzStatusText);
+            }
+        }
+
+        public bool IsUnifiedZzBusy
+        {
+            get { return _isUnifiedZzBusy; }
+            set
+            {
+                _isUnifiedZzBusy = value;
+                OnPropertyChanged(() => IsUnifiedZzBusy);
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        public bool IsExtractInProgress
+        {
+            get { return _isExtractInProgress; }
+            set
+            {
+                _isExtractInProgress = value;
+                OnPropertyChanged(() => IsExtractInProgress);
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        public int ExtractProcessedCount
+        {
+            get { return _extractProcessedCount; }
+            set
+            {
+                _extractProcessedCount = value;
+                OnPropertyChanged(() => ExtractProcessedCount);
+            }
+        }
+
+        public int ExtractTotalCount
+        {
+            get { return _extractTotalCount; }
+            set
+            {
+                _extractTotalCount = value;
+                OnPropertyChanged(() => ExtractTotalCount);
+            }
+        }
+
+        public double ExtractPercent
+        {
+            get { return _extractPercent; }
+            set
+            {
+                _extractPercent = value;
+                OnPropertyChanged(() => ExtractPercent);
+            }
+        }
+
+        public string ExtractProgressText
+        {
+            get { return _extractProgressText; }
+            set
+            {
+                _extractProgressText = value;
+                OnPropertyChanged(() => ExtractProgressText);
+            }
+        }
+
         public EdataManagerViewModel()
         {
             InitializeCommands();
+            _selectedUnifiedZzNodes.CollectionChanged += SelectedUnifiedZzNodesCollectionChanged;
 
             Settings settings = SettingsManager.Load();
 
@@ -106,6 +231,8 @@ namespace moddingSuite.ViewModel.Edata
         public ICommand ChangeExportPathCommand { get; set; }
         public ICommand ChangeWargamePathCommand { get; set; }
         public ICommand ChangePythonPathCommand { get; set; }
+        public ICommand ChangeQuickBmsPathCommand { get; set; }
+        public ICommand ChangeQuickBmsScriptPathCommand { get; set; }
         public ICommand EditNdfbinCommand { get; set; }
         public ICommand EditTradFileCommand { get; set; }
         public ICommand EditMeshCommand { get; set; }
@@ -118,6 +245,10 @@ namespace moddingSuite.ViewModel.Edata
         public ICommand OpenEdataFromWorkspaceCommand { get; set; }
         public ICommand AddNewFileCommand { get; set; }
         public ICommand SearchInZzDatCommand { get; set; }
+        public ICommand BuildUnifiedZzVirtualViewCommand { get; set; }
+        public ICommand ExportSelectedFromUnifiedZzCommand { get; set; }
+        public ICommand ExtractUnifiedZzToFolderCommand { get; set; }
+        public ICommand OpenUnifiedZzNodeCommand { get; set; }
 
 
         public ObservableCollection<EdataFileViewModel> OpenFiles
@@ -146,6 +277,11 @@ namespace moddingSuite.ViewModel.Edata
             set.LastOpenedFiles.Clear();
             set.LastOpenedFiles.AddRange(OpenFiles.Select(x => x.LoadedFile).ToList());
             SettingsManager.Save(set);
+        }
+
+        private void SelectedUnifiedZzNodesCollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+        {
+            CommandManager.InvalidateRequerySuggested();
         }
 
         public void AddFile(string path)
@@ -206,6 +342,8 @@ namespace moddingSuite.ViewModel.Edata
             ChangeExportPathCommand = new ActionCommand(ChangeExportPathExecute);
             ChangeWargamePathCommand = new ActionCommand(ChangeWargamePathExecute);
             ChangePythonPathCommand = new ActionCommand(ChangePythonPathExecute);
+            ChangeQuickBmsPathCommand = new ActionCommand(ChangeQuickBmsPathExecute);
+            ChangeQuickBmsScriptPathCommand = new ActionCommand(ChangeQuickBmsScriptPathExecute);
 
             ExportNdfCommand = new ActionCommand(ExportNdfExecute, () => IsOfType(EdataFileType.Ndfbin));
             ExportRawCommand = new ActionCommand(ExportRawExecute);
@@ -231,6 +369,10 @@ namespace moddingSuite.ViewModel.Edata
             ReplaceTextureFromWorkspaceCommand = new ActionCommand(ReplaceTextureFromWorkspaceExecute, () => IsOfType(EdataFileType.Image));
             ReplaceSoundFromWorkspaceCommand = new ActionCommand(ReplaceSoundFromWorkspaceExecute, () => HasEnding(".ess"));
             SearchInZzDatCommand = new ActionCommand(SearchInZzDatExecute);
+            BuildUnifiedZzVirtualViewCommand = new ActionCommand(BuildUnifiedZzVirtualViewExecute, CanBuildUnifiedZzVirtualViewExecute);
+            ExportSelectedFromUnifiedZzCommand = new ActionCommand(ExportSelectedFromUnifiedZzExecute, CanExportSelectedFromUnifiedZzExecute);
+            ExtractUnifiedZzToFolderCommand = new ActionCommand(ExtractUnifiedZzToFolderExecute, CanExtractUnifiedZzToFolderExecute);
+            OpenUnifiedZzNodeCommand = new ActionCommand(OpenUnifiedZzNodeExecute, CanOpenUnifiedZzNodeExecute);
         }
 
         private void AddNewFileExecute(object obj)
@@ -1009,6 +1151,8 @@ namespace moddingSuite.ViewModel.Edata
                 };
                 ZzDatSearchResults.Clear();
                 ZzDatSearchQuery = string.Empty;
+                ClearUnifiedZzState();
+                UnifiedZzStatusText = string.Empty;
                 OnPropertyChanged(() => Gamespace);
 
                 AutoLoadWarnoPackages(settings.WargamePath);
@@ -1033,6 +1177,57 @@ namespace moddingSuite.ViewModel.Edata
             }
         }
 
+        private void ChangeQuickBmsPathExecute(object obj)
+        {
+            Settings settings = SettingsManager.Load();
+
+            var openDlg = new OpenFileDialog
+            {
+                DefaultExt = ".exe",
+                Multiselect = false,
+                Filter = "QuickBMS executable|quickbms*.exe|Executable files|*.exe|All files|*.*"
+            };
+
+            string configuredPath = settings.QuickBmsPath;
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                if (Directory.Exists(configuredPath))
+                    openDlg.InitialDirectory = configuredPath;
+                else if (File.Exists(configuredPath))
+                    openDlg.InitialDirectory = new FileInfo(configuredPath).DirectoryName;
+            }
+
+            if (openDlg.ShowDialog().GetValueOrDefault())
+            {
+                settings.QuickBmsPath = openDlg.FileName;
+                SettingsManager.Save(settings);
+                StatusText = string.Format("QuickBMS executable set to: {0}", settings.QuickBmsPath);
+            }
+        }
+
+        private void ChangeQuickBmsScriptPathExecute(object obj)
+        {
+            Settings settings = SettingsManager.Load();
+
+            var openDlg = new OpenFileDialog
+            {
+                DefaultExt = ".bms",
+                Multiselect = false,
+                Filter = "QuickBMS script|*.bms|All files|*.*"
+            };
+
+            string configuredPath = settings.QuickBmsScriptPath;
+            if (!string.IsNullOrWhiteSpace(configuredPath) && File.Exists(configuredPath))
+                openDlg.InitialDirectory = new FileInfo(configuredPath).DirectoryName;
+
+            if (openDlg.ShowDialog().GetValueOrDefault())
+            {
+                settings.QuickBmsScriptPath = openDlg.FileName;
+                SettingsManager.Save(settings);
+                StatusText = string.Format("QuickBMS script set to: {0}", settings.QuickBmsScriptPath);
+            }
+        }
+
         protected void OpenFileExecute(object obj)
         {
             Settings settings = SettingsManager.Load();
@@ -1041,10 +1236,10 @@ namespace moddingSuite.ViewModel.Edata
             {
                 DefaultExt = ".dat",
                 Multiselect = true,
-                Filter = "Edat (.dat)|*.dat|All Files|*.*"
+                Filter = "Supported files (*.dat;*.ndfbin)|*.dat;*.ndfbin|Edat package (*.dat)|*.dat|NDF binary (*.ndfbin)|*.ndfbin|All files (*.*)|*.*"
             };
 
-            if (File.Exists(settings.LastOpenFolder))
+            if (Directory.Exists(settings.LastOpenFolder))
                 openfDlg.InitialDirectory = settings.LastOpenFolder;
 
 
@@ -1080,7 +1275,7 @@ namespace moddingSuite.ViewModel.Edata
                     fs.Seek(0, SeekOrigin.Begin);
                     fs.Read(buffer, 0, buffer.Length);
 
-                    var detailsVm = new NdfEditorMainViewModel(buffer);
+                    var detailsVm = new NdfEditorMainViewModel(buffer, fileName);
 
                     var view = new NdfbinView { DataContext = detailsVm };
 
@@ -1219,6 +1414,649 @@ namespace moddingSuite.ViewModel.Edata
             });
 
             searchTask.Start();
+        }
+
+        private bool CanBuildUnifiedZzVirtualViewExecute()
+        {
+            return !IsUnifiedZzBusy && !IsExtractInProgress;
+        }
+
+        private bool CanExportSelectedFromUnifiedZzExecute()
+        {
+            return IsUnifiedZzLoaded &&
+                   (SelectedUnifiedZzNode != null || SelectedUnifiedZzNodes.Count > 0) &&
+                   !IsUnifiedZzBusy &&
+                   !IsExtractInProgress;
+        }
+
+        private bool CanExtractUnifiedZzToFolderExecute()
+        {
+            return !IsUnifiedZzBusy && !IsExtractInProgress;
+        }
+
+        private bool CanOpenUnifiedZzNodeExecute()
+        {
+            return !IsUnifiedZzBusy && !IsExtractInProgress;
+        }
+
+        private void BuildUnifiedZzVirtualViewExecute(object obj)
+        {
+            string rootPath = ResolveGameRootPath();
+            if (string.IsNullOrWhiteSpace(rootPath) || !Directory.Exists(rootPath))
+            {
+                SetUnifiedStatus("Gamespace path does not exist. Please set your WARNO folder first.");
+                return;
+            }
+
+            var dispatcher = Dispatcher.CurrentDispatcher;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    dispatcher.Invoke(() =>
+                    {
+                        IsUnifiedZzBusy = true;
+                        IsUIBusy = true;
+                        SetUnifiedStatus(string.Format("Building unified ZZ virtual view from {0}...", rootPath));
+                    });
+
+                    UnifiedZzIndexResult indexResult;
+                    string errorMessage;
+                    if (!TryBuildUnifiedIndex(rootPath, true, out indexResult, out errorMessage))
+                    {
+                        dispatcher.Invoke(() =>
+                        {
+                            ClearUnifiedZzState();
+                            SetUnifiedStatus(errorMessage);
+                        });
+                        return;
+                    }
+
+                    dispatcher.Invoke(() => ApplyUnifiedIndexResult(indexResult, true));
+                }
+                catch (Exception ex)
+                {
+                    dispatcher.Invoke(() => SetUnifiedStatus(string.Format("Unified ZZ scan failed: {0}", ex.Message)));
+                    Trace.TraceError("Unified ZZ scan failed under {0}: {1}", rootPath, ex);
+                }
+                finally
+                {
+                    dispatcher.Invoke(() =>
+                    {
+                        IsUnifiedZzBusy = false;
+                        IsUIBusy = false;
+                    });
+                }
+            });
+        }
+
+        private void ExportSelectedFromUnifiedZzExecute(object obj)
+        {
+            List<VirtualNodeViewModel> selectedNodes = ResolveSelectedUnifiedZzNodes(obj);
+            if (selectedNodes.Count == 0)
+            {
+                SetUnifiedStatus("Select a virtual file or folder first.");
+                return;
+            }
+
+            Settings settings = SettingsManager.Load();
+            if (string.IsNullOrWhiteSpace(settings.SavePath))
+            {
+                SetUnifiedStatus("SavePath is not configured. Set export path first.");
+                return;
+            }
+
+            var entryByPath = new Dictionary<string, UnifiedZzEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (VirtualNodeViewModel selectedNode in selectedNodes)
+            {
+                foreach (UnifiedZzEntry entry in ResolveEntriesForNode(selectedNode))
+                {
+                    if (entry == null || string.IsNullOrWhiteSpace(entry.VirtualPath))
+                        continue;
+
+                    if (!entryByPath.ContainsKey(entry.VirtualPath))
+                        entryByPath[entry.VirtualPath] = entry;
+                }
+            }
+
+            var entryList = entryByPath.Values
+                .OrderBy(entry => entry.VirtualPath, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (entryList.Count == 0)
+            {
+                SetUnifiedStatus("No files to export for the selected virtual node.");
+                return;
+            }
+
+            var dispatcher = Dispatcher.CurrentDispatcher;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    dispatcher.Invoke(() =>
+                    {
+                        BeginExtractProgress(entryList.Count, "Exporting selected");
+                        SetUnifiedStatus(string.Format("Exporting {0} virtual files to {1}...", entryList.Count, settings.SavePath));
+                    });
+
+                    UnifiedZzExportResult result = _unifiedZzExportService.ExportEntries(
+                        entryList,
+                        settings.SavePath,
+                        progress => dispatcher.Invoke(() => UpdateExtractProgress(progress, "Exporting selected")));
+
+                    dispatcher.Invoke(() =>
+                    {
+                        EndExtractProgress();
+                        SetUnifiedStatus(BuildExportSummaryMessage("Selected export complete", result, settings.SavePath));
+                    });
+                }
+                catch (Exception ex)
+                {
+                    dispatcher.Invoke(() =>
+                    {
+                        EndExtractProgress();
+                        SetUnifiedStatus(string.Format("Selected export failed: {0}", ex.Message));
+                    });
+                    Trace.TraceError("Unified selected export failed: {0}", ex);
+                }
+            });
+        }
+
+        private void OpenUnifiedZzNodeExecute(object obj)
+        {
+            VirtualNodeViewModel node = obj as VirtualNodeViewModel ?? SelectedUnifiedZzNode;
+            if (node == null || node.IsFolder)
+                return;
+
+            if (!node.Name.EndsWith(".ndfbin", StringComparison.OrdinalIgnoreCase))
+            {
+                SetUnifiedStatus("Double-click open is available only for .ndfbin files.");
+                return;
+            }
+
+            UnifiedZzEntry entry = node.Entry;
+            ZzFileOccurrence source = entry == null ? null : entry.EffectiveOccurrence;
+            if (source == null || source.EntryRef == null || source.Manager == null)
+            {
+                SetUnifiedStatus("The selected virtual file has no readable source data.");
+                return;
+            }
+
+            try
+            {
+                byte[] bytes = source.Manager.GetRawData(source.EntryRef);
+                string normalizedPath = NormalizeVirtualPath(node.RelativePath);
+                if (string.IsNullOrWhiteSpace(normalizedPath))
+                    normalizedPath = node.Name;
+
+                string tempRoot = Path.Combine(Path.GetTempPath(), "moddingSuite", "virtual_zz_open");
+                string tempPath = Path.Combine(tempRoot, normalizedPath.Replace('/', Path.DirectorySeparatorChar));
+                string tempDirectory = Path.GetDirectoryName(tempPath);
+                if (!string.IsNullOrWhiteSpace(tempDirectory))
+                    Directory.CreateDirectory(tempDirectory);
+
+                File.WriteAllBytes(tempPath, bytes);
+                HandleNewFile(tempPath);
+                SetUnifiedStatus(string.Format("Opened virtual .ndfbin: {0}", normalizedPath));
+            }
+            catch (Exception ex)
+            {
+                SetUnifiedStatus(string.Format("Failed to open virtual .ndfbin '{0}': {1}", node.RelativePath, ex.Message));
+                Trace.TraceError("Failed to open virtual node {0}: {1}", node.RelativePath, ex);
+            }
+        }
+
+        private void ExtractUnifiedZzToFolderExecute(object obj)
+        {
+            Settings settings = SettingsManager.Load();
+
+            var folderDlg = new FolderBrowserDialog
+            {
+                SelectedPath = settings.SavePath,
+                ShowNewFolderButton = true,
+            };
+
+            if (folderDlg.ShowDialog() != DialogResult.OK)
+                return;
+
+            string destinationRoot = folderDlg.SelectedPath;
+            string gameRootPath = ResolveGameRootPath();
+
+            var dispatcher = Dispatcher.CurrentDispatcher;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    dispatcher.Invoke(() => IsUnifiedZzBusy = true);
+
+                    if (string.IsNullOrWhiteSpace(gameRootPath) || !Directory.Exists(gameRootPath))
+                    {
+                        dispatcher.Invoke(() => SetUnifiedStatus("Gamespace path does not exist. Please set your WARNO folder first."));
+                        return;
+                    }
+
+                    WarnoDatSnapshotResolution snapshot = _warnoDatSnapshotResolver.ResolveLatestFullSnapshot(gameRootPath);
+                    if (snapshot == null || !snapshot.Success || snapshot.Archives == null || snapshot.Archives.Count == 0)
+                    {
+                        string reason = snapshot == null ? "Unknown resolver error." : snapshot.Reason;
+                        dispatcher.Invoke(() => SetUnifiedStatus(string.Format("No full WARNO snapshot found under {0}. {1}", gameRootPath, reason)));
+                        return;
+                    }
+
+                    Settings runtimeSettings = SettingsManager.Load();
+                    string configuredQuickBmsPath = runtimeSettings == null ? null : runtimeSettings.QuickBmsPath;
+                    string configuredQuickBmsScriptPath = runtimeSettings == null ? null : runtimeSettings.QuickBmsScriptPath;
+
+                    string quickBmsExecutable;
+                    string quickBmsReason;
+                    bool canUseQuickBms = _quickBmsEdatExtractorService.TryResolveExecutable(
+                        gameRootPath,
+                        configuredQuickBmsPath,
+                        out quickBmsExecutable,
+                        out quickBmsReason);
+
+                    if (!canUseQuickBms)
+                    {
+                        dispatcher.Invoke(() => SetUnifiedStatus(string.Format(
+                            "QuickBMS unavailable ({0}). Configure QuickBMS path and try again.",
+                            quickBmsReason)));
+                        return;
+                    }
+
+                    string quickBmsScriptPath;
+                    string quickBmsScriptReason;
+                    bool canUseScript = _quickBmsEdatExtractorService.TryResolveScriptPath(
+                        gameRootPath,
+                        quickBmsExecutable,
+                        configuredQuickBmsScriptPath,
+                        out quickBmsScriptPath,
+                        out quickBmsScriptReason);
+
+                    if (!canUseScript)
+                    {
+                        dispatcher.Invoke(() => SetUnifiedStatus(string.Format(
+                            "QuickBMS script unavailable ({0}). Configure wargame_edat.bms and try again.",
+                            quickBmsScriptReason)));
+                        return;
+                    }
+
+                    string sampleDat = snapshot.Archives.FirstOrDefault() == null ? null : snapshot.Archives[0].ArchivePath;
+                    ExternalNdfbinToolDiagnosticsResult diagnostics = _externalNdfbinToolDiagnosticsService.RunWarnoCompatibilityCheck(sampleDat);
+                    if (diagnostics != null && !string.IsNullOrWhiteSpace(diagnostics.Summary))
+                        Trace.TraceInformation("NDFBIN diagnostics: {0}", diagnostics.Summary);
+
+                    dispatcher.Invoke(() =>
+                    {
+                        BeginExtractProgress(snapshot.Archives.Count, "Extracting archives");
+                        SetUnifiedStatus(string.Format(
+                            "Extracting {0} archives from snapshot {1} to {2}... {3}",
+                            snapshot.Archives.Count,
+                            snapshot.SnapshotPath,
+                            destinationRoot,
+                            snapshot.Reason ?? string.Empty));
+                    });
+
+                    UnifiedZzExportResult result = _quickBmsEdatExtractorService.ExtractArchives(
+                        snapshot.Archives,
+                        destinationRoot,
+                        quickBmsExecutable,
+                        quickBmsScriptPath,
+                        progress => dispatcher.Invoke(() => UpdateExtractProgress(progress, "Extracting archives")));
+
+                    dispatcher.Invoke(() =>
+                    {
+                        EndExtractProgress();
+                        string status = BuildExportSummaryMessage("QuickBMS extraction complete", result, destinationRoot);
+                        if (diagnostics != null && !string.IsNullOrWhiteSpace(diagnostics.Summary))
+                            status = status + " | " + diagnostics.Summary;
+
+                        SetUnifiedStatus(status);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    dispatcher.Invoke(() =>
+                    {
+                        EndExtractProgress();
+                        SetUnifiedStatus(string.Format("Unified export failed: {0}", ex.Message));
+                    });
+                    Trace.TraceError("Unified ZZ export failed: {0}", ex);
+                }
+                finally
+                {
+                    dispatcher.Invoke(() => IsUnifiedZzBusy = false);
+                }
+            });
+        }
+
+        private bool TryBuildUnifiedIndex(string rootPath, bool forceRebuild, out UnifiedZzIndexResult indexResult, out string errorMessage)
+        {
+            indexResult = null;
+            errorMessage = null;
+
+            if (string.IsNullOrWhiteSpace(rootPath) || !Directory.Exists(rootPath))
+            {
+                errorMessage = "Gamespace path does not exist. Please set your WARNO folder first.";
+                return false;
+            }
+
+            IReadOnlyList<ZzSourceArchiveInfo> archives = _zzDatDiscoveryService.DiscoverRecursively(rootPath);
+            if (archives.Count == 0)
+            {
+                errorMessage = string.Format("No compatible .dat package set found under {0}.", rootPath);
+                return false;
+            }
+
+            indexResult = _unifiedZzIndexService.BuildOrGetCached(rootPath, archives, forceRebuild);
+            return true;
+        }
+
+        private void ApplyUnifiedIndexResult(UnifiedZzIndexResult indexResult, bool rebuildTree)
+        {
+            _unifiedZzEntries = indexResult == null ? Array.Empty<UnifiedZzEntry>() : indexResult.Entries;
+
+            if (rebuildTree)
+                BuildUnifiedVirtualTree(_unifiedZzEntries);
+
+            IsUnifiedZzLoaded = _unifiedZzEntries.Count > 0;
+            ClearUnifiedZzSelection();
+            SelectedUnifiedZzNode = null;
+
+            if (indexResult == null)
+            {
+                SetUnifiedStatus("Unified ZZ index unavailable.");
+                return;
+            }
+
+            string sourceKind = indexResult.FromCache ? "cache" : "fresh scan";
+            SetUnifiedStatus(string.Format(
+                "Unified ZZ ready ({0}). Archives: {1}, indexed: {2}, failed: {3}, files: {4}.",
+                sourceKind,
+                indexResult.Archives.Count,
+                indexResult.IndexedArchiveCount,
+                indexResult.FailedArchiveCount,
+                indexResult.Entries.Count));
+        }
+
+        private void ClearUnifiedZzState()
+        {
+            _unifiedZzEntries = Array.Empty<UnifiedZzEntry>();
+            UnifiedZzRootNodes.Clear();
+            ClearUnifiedZzSelection();
+            SelectedUnifiedZzNode = null;
+            IsUnifiedZzLoaded = false;
+        }
+
+        private IEnumerable<UnifiedZzEntry> ResolveEntriesForNode(VirtualNodeViewModel node)
+        {
+            if (node == null || _unifiedZzEntries == null || _unifiedZzEntries.Count == 0)
+                return Enumerable.Empty<UnifiedZzEntry>();
+
+            if (!node.IsFolder)
+                return node.Entry != null ? new[] { node.Entry } : Enumerable.Empty<UnifiedZzEntry>();
+
+            string prefix = NormalizeVirtualPath(node.RelativePath);
+            if (string.IsNullOrWhiteSpace(prefix))
+                return _unifiedZzEntries;
+
+            string startsWith = prefix + "/";
+            return _unifiedZzEntries.Where(entry =>
+                entry.VirtualPath.Equals(prefix, StringComparison.OrdinalIgnoreCase) ||
+                entry.VirtualPath.StartsWith(startsWith, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private List<VirtualNodeViewModel> ResolveSelectedUnifiedZzNodes(object obj)
+        {
+            var selectedNodes = new List<VirtualNodeViewModel>();
+
+            if (obj is VirtualNodeViewModel singleNode)
+                selectedNodes.Add(singleNode);
+
+            if (obj is IEnumerable<VirtualNodeViewModel> nodeSequence)
+                selectedNodes.AddRange(nodeSequence.Where(node => node != null));
+
+            if (SelectedUnifiedZzNodes.Count > 0)
+                selectedNodes.AddRange(SelectedUnifiedZzNodes.Where(node => node != null));
+
+            if (selectedNodes.Count == 0 && SelectedUnifiedZzNode != null)
+                selectedNodes.Add(SelectedUnifiedZzNode);
+
+            return selectedNodes
+                .Distinct()
+                .ToList();
+        }
+
+        public void ApplyUnifiedZzSelection(IEnumerable<VirtualNodeViewModel> nodes)
+        {
+            var selection = (nodes ?? Enumerable.Empty<VirtualNodeViewModel>())
+                .Where(node => node != null)
+                .Distinct()
+                .ToList();
+
+            var selectedSet = new HashSet<VirtualNodeViewModel>(selection);
+            foreach (VirtualNodeViewModel node in EnumerateUnifiedVirtualNodes())
+                node.IsMultiSelected = selectedSet.Contains(node);
+
+            SelectedUnifiedZzNodes.Clear();
+            foreach (VirtualNodeViewModel node in selection)
+                SelectedUnifiedZzNodes.Add(node);
+        }
+
+        public void ClearUnifiedZzSelection()
+        {
+            ApplyUnifiedZzSelection(Array.Empty<VirtualNodeViewModel>());
+        }
+
+        private IEnumerable<VirtualNodeViewModel> EnumerateUnifiedVirtualNodes()
+        {
+            foreach (VirtualNodeViewModel rootNode in UnifiedZzRootNodes)
+            {
+                foreach (VirtualNodeViewModel node in EnumerateUnifiedVirtualNodes(rootNode))
+                    yield return node;
+            }
+        }
+
+        private static IEnumerable<VirtualNodeViewModel> EnumerateUnifiedVirtualNodes(VirtualNodeViewModel rootNode)
+        {
+            if (rootNode == null)
+                yield break;
+
+            yield return rootNode;
+            foreach (VirtualNodeViewModel childNode in rootNode.Children)
+            {
+                foreach (VirtualNodeViewModel node in EnumerateUnifiedVirtualNodes(childNode))
+                    yield return node;
+            }
+        }
+
+        private void BuildUnifiedVirtualTree(IReadOnlyList<UnifiedZzEntry> entries)
+        {
+            UnifiedZzRootNodes.Clear();
+            ClearUnifiedZzSelection();
+
+            var root = new VirtualNodeViewModel("ZZ Virtual", string.Empty, true);
+            var folderLookup = new Dictionary<string, VirtualNodeViewModel>(StringComparer.OrdinalIgnoreCase)
+            {
+                { string.Empty, root }
+            };
+
+            foreach (UnifiedZzEntry entry in entries ?? Array.Empty<UnifiedZzEntry>())
+            {
+                if (entry == null || string.IsNullOrWhiteSpace(entry.VirtualPath))
+                    continue;
+
+                root.FileCount++;
+
+                string[] parts = entry.VirtualPath
+                    .Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+
+                if (parts.Length == 0)
+                    continue;
+
+                VirtualNodeViewModel parent = root;
+                string currentFolderPath = string.Empty;
+
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    currentFolderPath = string.IsNullOrWhiteSpace(currentFolderPath)
+                        ? parts[i]
+                        : string.Format("{0}/{1}", currentFolderPath, parts[i]);
+
+                    if (!folderLookup.TryGetValue(currentFolderPath, out VirtualNodeViewModel folder))
+                    {
+                        folder = new VirtualNodeViewModel(parts[i], currentFolderPath, true);
+                        folderLookup[currentFolderPath] = folder;
+                        parent.Children.Add(folder);
+                    }
+
+                    folder.FileCount++;
+                    parent = folder;
+                }
+
+                string fileName = parts[parts.Length - 1];
+                string filePath = string.IsNullOrWhiteSpace(currentFolderPath)
+                    ? fileName
+                    : string.Format("{0}/{1}", currentFolderPath, fileName);
+
+                parent.Children.Add(new VirtualNodeViewModel(fileName, filePath, false)
+                {
+                    Entry = entry,
+                    MergeKind = entry.MergeKind
+                });
+            }
+
+            SortVirtualNodeChildren(root);
+            UnifiedZzRootNodes.Add(root);
+        }
+
+        private static void SortVirtualNodeChildren(VirtualNodeViewModel folderNode)
+        {
+            if (folderNode == null || !folderNode.IsFolder)
+                return;
+
+            List<VirtualNodeViewModel> sorted = folderNode.Children
+                .OrderByDescending(child => child.IsFolder)
+                .ThenBy(child => child.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            folderNode.Children.Clear();
+            foreach (VirtualNodeViewModel node in sorted)
+            {
+                folderNode.Children.Add(node);
+                SortVirtualNodeChildren(node);
+            }
+        }
+
+        private void BeginExtractProgress(int total, string activityLabel)
+        {
+            IsExtractInProgress = true;
+            ExtractTotalCount = Math.Max(0, total);
+            ExtractProcessedCount = 0;
+            ExtractPercent = 0;
+            string normalizedActivity = string.IsNullOrWhiteSpace(activityLabel) ? "Working" : activityLabel;
+            ExtractProgressText = BuildCompactProgressText(normalizedActivity, 0, ExtractTotalCount, 0);
+        }
+
+        private void UpdateExtractProgress(UnifiedZzExportProgress progress, string activityLabel = "Working")
+        {
+            if (progress == null)
+                return;
+
+            ExtractProcessedCount = progress.Processed;
+            ExtractTotalCount = progress.Total;
+            ExtractPercent = progress.Total > 0
+                ? Math.Min(100.0, (double)progress.Processed * 100.0 / progress.Total)
+                : 100.0;
+            string normalizedActivity = string.IsNullOrWhiteSpace(activityLabel) ? "Working" : activityLabel;
+            ExtractProgressText = BuildCompactProgressText(normalizedActivity, progress.Processed, progress.Total, ExtractPercent);
+        }
+
+        private void EndExtractProgress()
+        {
+            ExtractPercent = ExtractTotalCount > 0 ? 100.0 : 0.0;
+            ExtractProgressText = string.Format("Done... {0}/{1} (100%)", ExtractProcessedCount, ExtractTotalCount);
+            IsExtractInProgress = false;
+        }
+
+        private static string BuildCompactProgressText(string activity, int processed, int total, double percent)
+        {
+            return string.Format("{0}... {1}/{2} ({3:0}%)...", activity, processed, total, percent);
+        }
+
+        private string BuildExportSummaryMessage(string prefix, UnifiedZzExportResult result, string destinationRoot)
+        {
+            if (result == null)
+                return string.Format("{0}. No result was produced.", prefix);
+
+            if (result.Failed == 0)
+            {
+                return string.Format(
+                    "{0}. processed: {1}, converted: {2}, failed: {3}. Output: {4}",
+                    prefix,
+                    result.Processed,
+                    result.Succeeded,
+                    result.Failed,
+                    destinationRoot);
+            }
+
+            string failurePreview = string.Join(
+                " | ",
+                result.Failures
+                    .Take(3)
+                    .Select(f => string.Format("{0}: {1}", f.VirtualPath, f.Reason)));
+
+            return string.Format(
+                "{0}. processed: {1}, converted: {2}, failed: {3}. First failures: {4}. Output: {5}",
+                prefix,
+                result.Processed,
+                result.Succeeded,
+                result.Failed,
+                failurePreview,
+                destinationRoot);
+        }
+
+        private string ResolveGameRootPath()
+        {
+            if (Gamespace != null && !string.IsNullOrWhiteSpace(Gamespace.RootPath))
+                return Gamespace.RootPath;
+
+            Settings settings = SettingsManager.Load();
+            return settings.WargamePath;
+        }
+
+        private string ResolveDatSourceRoot()
+        {
+            string gameRoot = ResolveGameRootPath();
+            if (string.IsNullOrWhiteSpace(gameRoot))
+                return gameRoot;
+
+            string dataPc = Path.Combine(gameRoot, "Data", "PC");
+            if (Directory.Exists(dataPc))
+                return dataPc;
+
+            return gameRoot;
+        }
+
+        private void SetUnifiedStatus(string message)
+        {
+            UnifiedZzStatusText = message;
+            StatusText = message;
+        }
+
+        private static string NormalizeVirtualPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return string.Empty;
+
+            string normalized = path.Replace('\\', '/').Trim();
+            while (normalized.StartsWith("/", StringComparison.Ordinal))
+                normalized = normalized.Substring(1);
+
+            return normalized;
         }
 
         private void AutoLoadWarnoPackages(string rootPath)

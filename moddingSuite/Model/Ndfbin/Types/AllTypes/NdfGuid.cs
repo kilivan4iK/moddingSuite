@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using moddingSuite.BL.Ndf;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 {
@@ -16,7 +17,18 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            Guid guidValue;
+            if (Value is Guid)
+            {
+                guidValue = (Guid)Value;
+            }
+            else if (!Guid.TryParse(Value == null ? null : Value.ToString(), out guidValue))
+            {
+                return NdfTextWriter.NdfTextEncoding.GetBytes("GUID:{00000000-0000-0000-0000-000000000000}");
+            }
+
+            string normalized = NdfScriptGuidNormalizer.NormalizeGuidForScript(guidValue).ToUpperInvariant();
+            return NdfTextWriter.NdfTextEncoding.GetBytes(string.Format("GUID:{{{0}}}", normalized));
         }
     }
 }

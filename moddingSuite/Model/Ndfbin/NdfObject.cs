@@ -78,10 +78,11 @@ namespace moddingSuite.Model.Ndfbin
             using (var ms = new MemoryStream())
             {
                 byte[] buffer =
-                    enc.GetBytes(string.Format("{0}_{1} is {2}\n", NdfTextWriter.InstanceNamePrefix, Id, Class.Name));
+                    enc.GetBytes(string.Format("{0} is {1}\n", NdfTextWriter.GetObjectName(Id), Class.Name));
 
                 ms.Write(buffer, 0, buffer.Length);
-                ms.Write(enc.GetBytes("(\n"), 0, 1);
+                buffer = enc.GetBytes("(\n");
+                ms.Write(buffer, 0, buffer.Length);
 
                 var propBuff = new List<byte>();
 
@@ -90,9 +91,12 @@ namespace moddingSuite.Model.Ndfbin
                     if (propVal.Type == NdfType.Unset)
                         continue;
 
-                    propBuff.AddRange(enc.GetBytes(string.Format("{0} =", propVal.Property.Name)));
-                    propBuff.AddRange(propVal.Value.GetNdfText());
-                    propBuff.AddRange(enc.GetBytes("\n"));
+                    propBuff.AddRange(enc.GetBytes(string.Format("{0} = ", propVal.Property.Name)));
+                    byte[] valueBuffer = propVal.Value.GetNdfText();
+                    propBuff.AddRange(valueBuffer);
+
+                    if (!EndsWithLineBreak(valueBuffer))
+                        propBuff.AddRange(enc.GetBytes("\n"));
 
                     buffer = propBuff.ToArray();
                     propBuff.Clear();
@@ -100,12 +104,37 @@ namespace moddingSuite.Model.Ndfbin
                     ms.Write(buffer, 0, buffer.Length);
                 }
 
-                ms.Write(enc.GetBytes(")\n"), 0, 1);
+                buffer = enc.GetBytes(")\n");
+                ms.Write(buffer, 0, buffer.Length);
 
                 return ms.ToArray();
             }
         }
 
         #endregion
+
+        private static bool EndsWithLineBreak(byte[] data)
+        {
+            if (data == null || data.Length == 0)
+                return false;
+
+            int len = data.Length;
+            if (data[len - 1] == (byte)'\n')
+                return true;
+
+            if (data[len - 1] == 0 && len >= 2 && data[len - 2] == (byte) '\n')
+                return true;
+
+            if (data.Length >= 4 &&
+                data[len - 4] == (byte) '\r' &&
+                data[len - 3] == 0 &&
+                data[len - 2] == (byte) '\n' &&
+                data[len - 1] == 0)
+            {
+                return true;
+            }
+
+            return false;
+        }
     }
 }

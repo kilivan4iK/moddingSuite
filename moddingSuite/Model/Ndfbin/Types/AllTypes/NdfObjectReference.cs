@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using moddingSuite.BL.Ndf;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 {
@@ -88,7 +89,10 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            if (_isDead || Class == null)
+                return NdfTextWriter.NdfTextEncoding.GetBytes("nil");
+
+            return NdfTextWriter.NdfTextEncoding.GetBytes(NdfTextWriter.GetObjectName(InstanceId));
         }
     }
 }

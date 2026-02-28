@@ -6,8 +6,8 @@
     xmlns:local="clr-namespace:moddingSuite.View"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="WMS Settings"
-    Width="402.696"
-    Height="336.746"
+    Width="430"
+    Height="430"
     Icon="{StaticResource SaveIcon}"
     mc:Ignorable="d">
     <Grid>
@@ -30,6 +30,8 @@
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -110,11 +112,56 @@
                 Grid.Column="0"
                 Margin="0,0,10,0"
                 VerticalAlignment="Center"
-                Text="Export to full path" />
-            <CheckBox
+                Text="QuickBMS exe" />
+            <DockPanel
                 Grid.Row="4"
                 Grid.Column="1"
-                Margin="0,7,0,7" />
+                LastChildFill="True">
+                <Button
+                    Margin="0,2,0,2"
+                    Click="QuickBmsExeButtonClick"
+                    DockPanel.Dock="Right">
+                    ...
+                </Button>
+                <TextBox
+                    Margin="0,2,0,2"
+                    IsReadOnly="True"
+                    Text="{Binding Path=QuickBmsPath}" />
+            </DockPanel>
+
+            <TextBlock
+                Grid.Row="5"
+                Grid.Column="0"
+                Margin="0,0,10,0"
+                VerticalAlignment="Center"
+                Text="QuickBMS script" />
+            <DockPanel
+                Grid.Row="5"
+                Grid.Column="1"
+                LastChildFill="True">
+                <Button
+                    Margin="0,2,0,2"
+                    Click="QuickBmsScriptButtonClick"
+                    DockPanel.Dock="Right">
+                    ...
+                </Button>
+                <TextBox
+                    Margin="0,2,0,2"
+                    IsReadOnly="True"
+                    Text="{Binding Path=QuickBmsScriptPath}" />
+            </DockPanel>
+
+            <TextBlock
+                Grid.Row="6"
+                Grid.Column="0"
+                Margin="0,0,10,0"
+                VerticalAlignment="Center"
+                Text="Export to full path" />
+            <CheckBox
+                Grid.Row="6"
+                Grid.Column="1"
+                Margin="0,7,0,7"
+                IsChecked="{Binding Path=ExportWithFullPath}" />
         </Grid>
 
         <Grid Grid.Row="2">

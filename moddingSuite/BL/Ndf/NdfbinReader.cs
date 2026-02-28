@@ -47,13 +47,31 @@ namespace moddingSuite.BL.Ndf
 
         public byte[] GetUncompressedNdfbinary(byte[] data)
         {
+            NdfHeader header;
             using (var ms = new MemoryStream(data))
             {
-                var header = ReadHeader(ms);
+                header = ReadHeader(ms);
                 data = DecompressBodyIfNeeded(data, header);
             }
 
+            if (header.IsCompressedBody)
+                NormalizeHeaderForUncompressedOutput(data);
+
             return data;
+        }
+
+        private void NormalizeHeaderForUncompressedOutput(byte[] data)
+        {
+            if (data == null || data.Length < 40)
+                throw new InvalidDataException("Invalid uncompressed NDF data.");
+
+            // Compression flag
+            byte[] flagBuffer = BitConverter.GetBytes((uint)0);
+            Buffer.BlockCopy(flagBuffer, 0, data, 12, flagBuffer.Length);
+
+            // Full file size for consistency in uncompressed output.
+            byte[] fullSizeBuffer = BitConverter.GetBytes((ulong)data.Length);
+            Buffer.BlockCopy(fullSizeBuffer, 0, data, 32, fullSizeBuffer.Length);
         }
 
         private byte[] DecompressBodyIfNeeded(byte[] data, NdfHeader header)

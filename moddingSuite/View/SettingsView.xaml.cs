@@ -12,6 +12,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using System.IO;
 using moddingSuite.BL;
 using moddingSuite.Model.Settings;
 
@@ -73,6 +74,60 @@ namespace moddingSuite.View
 
             if (folderDlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
                 settings.WargamePath = folderDlg.SelectedPath;
+        }
+
+        private void QuickBmsExeButtonClick(object sender, RoutedEventArgs e)
+        {
+            var settings = DataContext as Settings;
+            if (settings == null)
+                return;
+
+            var openDlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Filter = "QuickBMS executable|quickbms*.exe|Executable files|*.exe|All files|*.*",
+                Multiselect = false
+            };
+
+            string initialDirectory = ResolveInitialDirectory(settings.QuickBmsPath);
+            if (!string.IsNullOrWhiteSpace(initialDirectory))
+                openDlg.InitialDirectory = initialDirectory;
+
+            if (openDlg.ShowDialog().GetValueOrDefault())
+                settings.QuickBmsPath = openDlg.FileName;
+        }
+
+        private void QuickBmsScriptButtonClick(object sender, RoutedEventArgs e)
+        {
+            var settings = DataContext as Settings;
+            if (settings == null)
+                return;
+
+            var openDlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Filter = "QuickBMS script|*.bms|All files|*.*",
+                Multiselect = false
+            };
+
+            string initialDirectory = ResolveInitialDirectory(settings.QuickBmsScriptPath);
+            if (!string.IsNullOrWhiteSpace(initialDirectory))
+                openDlg.InitialDirectory = initialDirectory;
+
+            if (openDlg.ShowDialog().GetValueOrDefault())
+                settings.QuickBmsScriptPath = openDlg.FileName;
+        }
+
+        private static string ResolveInitialDirectory(string configuredPath)
+        {
+            if (string.IsNullOrWhiteSpace(configuredPath))
+                return null;
+
+            if (Directory.Exists(configuredPath))
+                return configuredPath;
+
+            if (File.Exists(configuredPath))
+                return System.IO.Path.GetDirectoryName(configuredPath);
+
+            return null;
         }
     }
 }

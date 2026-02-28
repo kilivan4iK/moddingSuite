@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using moddingSuite.BL.Ndf;
 using moddingSuite.Util;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
@@ -12,7 +13,7 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public new byte[] Value
         {
-            get { return (byte[]) base.Value; }
+            get { return (byte[])base.Value; }
             set
             {
                 base.Value = value;
@@ -32,7 +33,7 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            return NdfTextWriter.NdfTextEncoding.GetBytes(string.Format("LOC(0x{0})", ToString()));
         }
     }
 }

@@ -58,6 +58,19 @@
                         Width="26"
                         Height="26" />
                 </Button>
+                <Menu>
+                    <MenuItem ToolTip="NDFBIN decompression">
+                        <MenuItem.Header>
+                            <Image Source="{StaticResource ExtractZipedPartIcon}" />
+                        </MenuItem.Header>
+                        <MenuItem Command="{Binding ExportDecompiledTextNdfCommand}" Header="Decompile current to text .ndf (universal)" />
+                        <MenuItem Command="{Binding ExportDecompressedNdfCommand}" Header="Decompress current to .ndf" />
+                        <MenuItem Command="{Binding BatchDecompressNdfbinFolderCommand}" Header="Batch decompress folder (*.ndfbin)" />
+                        <Separator />
+                        <MenuItem Command="{Binding ExportByteMapFieldCommand}" Header="Byte-map field (GUID auto/targeted)" />
+                        <MenuItem Command="{Binding ExportByteMapAllCommand}" Header="Byte-map all GUID fields (CSV)" />
+                    </MenuItem>
+                </Menu>
             </ToolBar>
             <Popup
                 AllowsTransparency="True"

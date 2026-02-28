@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
+using moddingSuite.BL.Ndf;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 {
@@ -15,7 +16,7 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
         {
             var data = new List<byte>();
 
-            var val = (string) Value;
+            var val = (string)Value;
 
             byte[] valBytes = Encoding.Unicode.GetBytes(val);
 
@@ -27,7 +28,8 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            string value = Value == null ? string.Empty : Value.ToString().Replace("\"", "\\\"");
+            return NdfTextWriter.NdfTextEncoding.GetBytes(string.Format("L\"{0}\"", value));
         }
     }
 }

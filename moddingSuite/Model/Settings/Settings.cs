@@ -11,6 +11,8 @@ namespace moddingSuite.Model.Settings
         private int _lastHighlightedFileIndex;
         private string _wargamePath;
         private string _pythonPath;
+        private string _quickBmsPath;
+        private string _quickBmsScriptPath;
         private bool _exportWithFullPath = true;
         private bool _initialSettings = true;
 
@@ -56,6 +58,18 @@ namespace moddingSuite.Model.Settings
         {
             get { return _pythonPath; }
             set { _pythonPath = value; OnPropertyChanged(() => PythonPath); }
+        }
+
+        public string QuickBmsPath
+        {
+            get { return _quickBmsPath; }
+            set { _quickBmsPath = value; OnPropertyChanged(() => QuickBmsPath); }
+        }
+
+        public string QuickBmsScriptPath
+        {
+            get { return _quickBmsScriptPath; }
+            set { _quickBmsScriptPath = value; OnPropertyChanged(() => QuickBmsScriptPath); }
         }
 
         public bool ExportWithFullPath

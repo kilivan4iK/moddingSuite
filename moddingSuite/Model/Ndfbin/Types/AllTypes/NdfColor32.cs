@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Drawing;
+using moddingSuite.BL.Ndf;
 
 namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 {
@@ -21,7 +22,9 @@ namespace moddingSuite.Model.Ndfbin.Types.AllTypes
 
         public override byte[] GetNdfText()
         {
-            throw new NotImplementedException();
+            var col = (Color)Value;
+            string text = string.Format("RGBA({0},{1},{2},{3})", col.R, col.G, col.B, col.A);
+            return NdfTextWriter.NdfTextEncoding.GetBytes(text);
         }
     }
 }

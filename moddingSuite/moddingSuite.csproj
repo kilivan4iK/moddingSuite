@@ -263,6 +263,13 @@
   <ItemGroup>
     <Resource Include="View\Images\python-26.png" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="..\tools\quickbms_win\**\*">
+      <Link>tools\quickbms_win\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
   <ItemGroup Condition=" '$(TargetFramework)' == 'net9.0-windows' ">
     <PackageReference Include="DynamicLanguageRuntime" Version="1.3.5" />
     <PackageReference Include="Ionic.Zlib.Core" Version="1.0.0" />
