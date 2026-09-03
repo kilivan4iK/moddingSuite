@@ -109,6 +109,12 @@ namespace moddingSuite.BL
                 case 2:
                     Files = ReadEdatV2Dictionary();
                     break;
+                case 3:
+                    // V3 shares the V2 dictionary/entry layout but never uses the legacy
+                    // odd-length name padding, so read it directly with padding disabled.
+                    _v2UsesLegacyNamePadding = false;
+                    Files = ReadEdatV2Dictionary(false);
+                    break;
                 default:
                     throw new NotSupportedException(string.Format("Edata Version {0} is currently not supported", Header.Version));
             }
@@ -127,9 +133,30 @@ namespace moddingSuite.BL
             using (var fs = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 fs.Read(buffer, 0, buffer.Length);
 
+            uint version = BitConverter.ToUInt32(buffer, 4);
+
+            if (version == 3)
+            {
+                // WARNO 2026 update (build 197351/201602) repacked EDAT as version 3: the header
+                // fields were realigned to 4-byte boundaries and the file-region offset/length
+                // widened to 64-bit (ZZ_3.dat is >4 GiB). The dictionary/entry layout is otherwise
+                // identical to V2, so fill an EdataHeader from the V3 offsets and reuse the V2
+                // dictionary reader. FileLength is only consumed by the writer, so the low 32 bits
+                // suffice for the read path; FileOffset is the small data-region start (< 4 GiB).
+                return new EdataHeader
+                {
+                    Magic = BitConverter.ToUInt32(buffer, 0),
+                    Version = version,
+                    DictOffset = BitConverter.ToUInt32(buffer, 8),
+                    DictLength = BitConverter.ToUInt32(buffer, 12),
+                    FileOffset = BitConverter.ToUInt32(buffer, 16),
+                    FileLength = BitConverter.ToUInt32(buffer, 24),
+                };
+            }
+
             header = Utils.ByteArrayToStructure<EdataHeader>(buffer);
 
-            if (header.Version > 2)
+            if (header.Version > 3)
                 throw new NotSupportedException(string.Format("Edata version {0} not supported", header.Version));
 
             return header;
@@ -689,6 +716,7 @@ namespace moddingSuite.BL
                 case ".tgv":
                     return EdataFileType.Image;
                 case ".ndfbin":
+                case ".atlas":
                     return EdataFileType.Ndfbin;
                 case ".dic":
                     return EdataFileType.Dictionary;

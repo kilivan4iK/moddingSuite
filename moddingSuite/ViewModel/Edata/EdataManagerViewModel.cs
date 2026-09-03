@@ -96,8 +96,63 @@ namespace moddingSuite.ViewModel.Edata
             {
                 _selectedUnifiedZzNode = value;
                 OnPropertyChanged(() => SelectedUnifiedZzNode);
+                RefreshCurrentZzFolder();
                 CommandManager.InvalidateRequerySuggested();
             }
+        }
+
+        public enum ZzContentMode { Tree, Tiles, List }
+
+        private ZzContentMode _zzContentMode = ZzContentMode.Tiles;
+        public ZzContentMode ZzContentViewMode
+        {
+            get { return _zzContentMode; }
+            set
+            {
+                if (_zzContentMode == value) return;
+                _zzContentMode = value;
+                OnPropertyChanged(nameof(ZzContentViewMode));
+                OnPropertyChanged(nameof(IsZzTreeMode));
+                OnPropertyChanged(nameof(IsZzTilesMode));
+                OnPropertyChanged(nameof(IsZzListMode));
+                OnPropertyChanged(nameof(IsZzContentPaneVisible));
+            }
+        }
+        public bool IsZzTreeMode  => _zzContentMode == ZzContentMode.Tree;
+        public bool IsZzTilesMode => _zzContentMode == ZzContentMode.Tiles;
+        public bool IsZzListMode  => _zzContentMode == ZzContentMode.List;
+        public bool IsZzContentPaneVisible => _zzContentMode != ZzContentMode.Tree;
+
+        public ICommand SetZzTreeModeCommand  { get; private set; }
+        public ICommand SetZzTilesModeCommand { get; private set; }
+        public ICommand SetZzListModeCommand  { get; private set; }
+
+        // Children of currently-selected tree folder, shown in Tiles / List panes.
+        // Empty when nothing is selected or a leaf file is selected.
+        public ObservableCollection<VirtualNodeViewModel> CurrentZzFolderChildren { get; }
+            = new ObservableCollection<VirtualNodeViewModel>();
+
+        public string CurrentZzFolderPath
+        {
+            get
+            {
+                VirtualNodeViewModel n = _selectedUnifiedZzNode;
+                if (n == null) return "(select a folder)";
+                if (!n.IsFolder) n = null; // leaf — caller may want to navigate up
+                return n?.RelativePath ?? "(select a folder)";
+            }
+        }
+
+        private void RefreshCurrentZzFolder()
+        {
+            CurrentZzFolderChildren.Clear();
+            VirtualNodeViewModel n = _selectedUnifiedZzNode;
+            if (n != null && n.IsFolder)
+            {
+                foreach (VirtualNodeViewModel child in n.Children)
+                    CurrentZzFolderChildren.Add(child);
+            }
+            OnPropertyChanged(nameof(CurrentZzFolderPath));
         }
 
         public bool IsUnifiedZzLoaded
@@ -249,12 +304,31 @@ namespace moddingSuite.ViewModel.Edata
         public ICommand ExportSelectedFromUnifiedZzCommand { get; set; }
         public ICommand ExtractUnifiedZzToFolderCommand { get; set; }
         public ICommand OpenUnifiedZzNodeCommand { get; set; }
+        public ICommand ConvertVirtualEssToWavCommand { get; set; }
+        public ICommand ExportTgvAsPngCommand { get; set; }
+        public ICommand ExtractAtlasTexturesCommand { get; set; }
+        public ICommand ToggleAnchorableVisibilityCommand { get; set; }
+        public ICommand ResetPaneLayoutCommand { get; set; }
+        public ICommand FocusDocumentCommand { get; set; }
+
+        // Raised when the user requests showing/hiding a panel. The view
+        // (code-behind) holds the DockingManager reference and applies the
+        // change to the AvalonDock layout. Keeps the VM XAML-free.
+        public event System.Action<string> ToggleAnchorableRequested;
+        public event System.Action ResetPaneLayoutRequested;
+        public event System.Action<EdataFileViewModel> FocusDocumentRequested;
 
 
         public ObservableCollection<EdataFileViewModel> OpenFiles
         {
             get { return _openFiles; }
         }
+
+        // AvalonDock anchorable panels. Populated once at construction; each
+        // entry has a Title (used by LayoutAnchorableItem container style) and
+        // an Owner reference back to this VM so per-pane DataTemplates can
+        // resolve bindings even when the panel is floated into another window.
+        public ObservableCollection<PaneViewModel> Anchorables { get; } = new ObservableCollection<PaneViewModel>();
 
         public ObservableCollection<string> ZzDatSearchResults
         {
@@ -373,6 +447,208 @@ namespace moddingSuite.ViewModel.Edata
             ExportSelectedFromUnifiedZzCommand = new ActionCommand(ExportSelectedFromUnifiedZzExecute, CanExportSelectedFromUnifiedZzExecute);
             ExtractUnifiedZzToFolderCommand = new ActionCommand(ExtractUnifiedZzToFolderExecute, CanExtractUnifiedZzToFolderExecute);
             OpenUnifiedZzNodeCommand = new ActionCommand(OpenUnifiedZzNodeExecute, CanOpenUnifiedZzNodeExecute);
+            ConvertVirtualEssToWavCommand = new ActionCommand(ConvertVirtualEssToWavExecute);
+            ExportTgvAsPngCommand = new ActionCommand(ExportTgvAsPngExecute);
+            ExtractAtlasTexturesCommand = new ActionCommand(ExtractAtlasTexturesExecute);
+            SetZzTreeModeCommand  = new ActionCommand(_ => ZzContentViewMode = ZzContentMode.Tree);
+            SetZzTilesModeCommand = new ActionCommand(_ => ZzContentViewMode = ZzContentMode.Tiles);
+            SetZzListModeCommand  = new ActionCommand(_ => ZzContentViewMode = ZzContentMode.List);
+            ToggleAnchorableVisibilityCommand = new ActionCommand(
+                o => ToggleAnchorableRequested?.Invoke(o as string));
+            ResetPaneLayoutCommand = new ActionCommand(
+                o => ResetPaneLayoutRequested?.Invoke());
+            FocusDocumentCommand = new ActionCommand(
+                o => FocusDocumentRequested?.Invoke(o as EdataFileViewModel));
+
+            Anchorables.Add(new WorkspacePaneViewModel  { Title = "Workspace",  ContentId = "workspace",  Owner = this });
+            Anchorables.Add(new GamespacePaneViewModel  { Title = "Gamespace",  ContentId = "gamespace",  Owner = this });
+            Anchorables.Add(new ZzVirtualPaneViewModel  { Title = "ZZ Virtual", ContentId = "zzVirtual",  Owner = this });
+        }
+
+        private void ConvertVirtualEssToWavExecute(object obj)
+        {
+            var node = obj as VirtualNodeViewModel;
+            if (node == null || node.IsFolder ||
+                !node.Name.EndsWith(".ess", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var entry = node.Entry;
+            var source = entry?.EffectiveOccurrence;
+            if (source?.EntryRef == null || source.Manager == null)
+            {
+                SetUnifiedStatus("The selected file has no readable source data.");
+                return;
+            }
+
+            var saveDlg = new Microsoft.Win32.SaveFileDialog
+            {
+                Filter = "WAV audio (*.wav)|*.wav",
+                FileName = Path.GetFileNameWithoutExtension(node.Name) + ".wav",
+                Title = "Convert ESS to WAV",
+            };
+
+            var settings = SettingsManager.Load();
+            if (!string.IsNullOrWhiteSpace(settings.SavePath) && Directory.Exists(settings.SavePath))
+                saveDlg.InitialDirectory = settings.SavePath;
+
+            if (saveDlg.ShowDialog() != true) return;
+
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            var outputPath = saveDlg.FileName;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    dispatcher.Invoke(() => IsUIBusy = true);
+                    dispatcher.Invoke(() => SetUnifiedStatus("Converting to WAV..."));
+                    byte[] essBytes = source.Manager.GetRawData(source.EntryRef);
+                    byte[] wavBytes = WarnoEssDecoder.DecodeToWav(essBytes);
+                    File.WriteAllBytes(outputPath, wavBytes);
+                    dispatcher.Invoke(() => SetUnifiedStatus(
+                        string.Format("Saved {0}", Path.GetFileName(outputPath))));
+                }
+                catch (Exception ex)
+                {
+                    dispatcher.Invoke(() => SetUnifiedStatus(
+                        string.Format("Convert failed: {0}", ex.Message)));
+                    Trace.TraceError("ConvertVirtualEssToWav failed: {0}", ex);
+                }
+                finally
+                {
+                    dispatcher.Invoke(() => IsUIBusy = false);
+                }
+            });
+        }
+
+        private void ExportTgvAsPngExecute(object obj)
+        {
+            var node = obj as VirtualNodeViewModel;
+            if (node == null || node.IsFolder ||
+                !node.Name.EndsWith(".tgv", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var entry = node.Entry;
+            var source = entry?.EffectiveOccurrence;
+            if (source?.EntryRef == null || source.Manager == null)
+            {
+                SetUnifiedStatus("The selected file has no readable source data.");
+                return;
+            }
+
+            var saveDlg = new Microsoft.Win32.SaveFileDialog
+            {
+                Filter = "PNG image (*.png)|*.png",
+                FileName = System.IO.Path.GetFileNameWithoutExtension(node.Name) + ".png",
+                Title = "Export TGV as PNG",
+            };
+            var settings = SettingsManager.Load();
+            if (!string.IsNullOrWhiteSpace(settings.SavePath) && System.IO.Directory.Exists(settings.SavePath))
+                saveDlg.InitialDirectory = settings.SavePath;
+            if (saveDlg.ShowDialog() != true) return;
+
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            var outputPath = saveDlg.FileName;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    dispatcher.Invoke(() => IsUIBusy = true);
+                    dispatcher.Invoke(() => SetUnifiedStatus("Decoding TGV..."));
+                    byte[] tgvBytes = source.Manager.GetRawData(source.EntryRef);
+                    using var bmp = moddingSuite.BL.TGV.TgvDecoder.DecodeFullRes(tgvBytes);
+                    moddingSuite.BL.TGV.TgvDecoder.SavePng(bmp, outputPath);
+                    dispatcher.Invoke(() => SetUnifiedStatus(
+                        string.Format("Saved {0} ({1}x{2})",
+                            System.IO.Path.GetFileName(outputPath), bmp.Width, bmp.Height)));
+                }
+                catch (Exception ex)
+                {
+                    dispatcher.Invoke(() => SetUnifiedStatus("PNG export failed: " + ex.Message));
+                    Trace.TraceError("ExportTgvAsPng failed: {0}", ex);
+                }
+                finally
+                {
+                    dispatcher.Invoke(() => IsUIBusy = false);
+                }
+            });
+        }
+
+        private void ExtractAtlasTexturesExecute(object obj)
+        {
+            var node = obj as VirtualNodeViewModel;
+            if (node == null || node.IsFolder ||
+                !node.Name.EndsWith(".atlas", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var entry = node.Entry;
+            var source = entry?.EffectiveOccurrence;
+            if (source?.EntryRef == null || source.Manager == null)
+            {
+                SetUnifiedStatus("The selected file has no readable source data.");
+                return;
+            }
+
+            var folderDlg = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = "Pick output folder for extracted atlas textures",
+                ShowNewFolderButton = true,
+            };
+            var settings = SettingsManager.Load();
+            if (!string.IsNullOrWhiteSpace(settings.SavePath) && System.IO.Directory.Exists(settings.SavePath))
+                folderDlg.SelectedPath = settings.SavePath;
+            if (folderDlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+
+            string outputDir = folderDlg.SelectedPath;
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            string nodeRel = node.RelativePath ?? node.Name;
+
+            // Snapshot ZZ entry index so the worker thread can resolve TGVs by relative
+            // path without touching UI-bound collections.
+            var entriesSnapshot = _unifiedZzEntries;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    dispatcher.Invoke(() => IsUIBusy = true);
+                    dispatcher.Invoke(() => SetUnifiedStatus("Extracting atlas..."));
+                    byte[] atlasBytes = source.Manager.GetRawData(source.EntryRef);
+                    var result = moddingSuite.BL.Tgv.AtlasTextureExtractor.Extract(
+                        atlasBytes: atlasBytes,
+                        atlasVirtualPath: nodeRel,
+                        outputDirectory: outputDir,
+                        zzEntries: entriesSnapshot,
+                        progress: msg => dispatcher.Invoke(() => SetUnifiedStatus(msg)));
+
+                    foreach (var w in result.Warnings) Trace.TraceWarning("[atlas] {0}", w);
+
+                    string statusMsg;
+                    if (result.WrittenCount > 0)
+                    {
+                        statusMsg = string.Format("Atlas extracted: {0} textures written to {1} (scanned {2}, skipped {3}).",
+                            result.WrittenCount, outputDir, result.EntryCount, result.SkippedCount);
+                    }
+                    else
+                    {
+                        var firstWarn = result.Warnings.Count > 0 ? result.Warnings[0] : "no entries matched";
+                        statusMsg = string.Format(
+                            "Atlas extraction wrote 0 files (scanned {0}, skipped {1}). First reason: {2}. Run 'Build Virtual ZZ View' first so the source TGVs are indexed.",
+                            result.EntryCount, result.SkippedCount, firstWarn);
+                    }
+                    dispatcher.Invoke(() => SetUnifiedStatus(statusMsg));
+                }
+                catch (Exception ex)
+                {
+                    dispatcher.Invoke(() => SetUnifiedStatus("Atlas extraction failed: " + ex.Message));
+                    Trace.TraceError("ExtractAtlasTextures failed: {0}", ex);
+                }
+                finally
+                {
+                    dispatcher.Invoke(() => IsUIBusy = false);
+                }
+            });
         }
 
         private void AddNewFileExecute(object obj)
@@ -839,8 +1115,7 @@ namespace moddingSuite.ViewModel.Edata
 
                     dispatcher.Invoke(report, string.Format("Exporting to {0}...", exportPath));
 
-                    var tgvReader = new EssReader();
-                    var tgv = tgvReader.ReadEss(vm.EdataManager.GetRawData(sourceEssFile));
+                    var tgv = WarnoEssDecoder.DecodeToWav(vm.EdataManager.GetRawData(sourceEssFile));
 
                     using (var fs = new FileStream(Path.Combine(settings.SavePath, f.Name + ".wav"), FileMode.OpenOrCreate))
                     {
@@ -1236,7 +1511,7 @@ namespace moddingSuite.ViewModel.Edata
             {
                 DefaultExt = ".dat",
                 Multiselect = true,
-                Filter = "Supported files (*.dat;*.ndfbin)|*.dat;*.ndfbin|Edat package (*.dat)|*.dat|NDF binary (*.ndfbin)|*.ndfbin|All files (*.*)|*.*"
+                Filter = "Supported files (*.dat;*.ndfbin;*.atlas)|*.dat;*.ndfbin;*.atlas|Edat package (*.dat)|*.dat|NDF binary (*.ndfbin;*.atlas)|*.ndfbin;*.atlas|All files (*.*)|*.*"
             };
 
             if (Directory.Exists(settings.LastOpenFolder))
@@ -1568,12 +1843,20 @@ namespace moddingSuite.ViewModel.Edata
         private void OpenUnifiedZzNodeExecute(object obj)
         {
             VirtualNodeViewModel node = obj as VirtualNodeViewModel ?? SelectedUnifiedZzNode;
-            if (node == null || node.IsFolder)
-                return;
+            if (node == null) return;
 
-            if (!node.Name.EndsWith(".ndfbin", StringComparison.OrdinalIgnoreCase))
+            // Double-click on a folder tile/row in the right pane = drill into it
+            // (mirrors Windows Explorer). Folders never have a viewer to open.
+            if (node.IsFolder)
             {
-                SetUnifiedStatus("Double-click open is available only for .ndfbin files.");
+                node.IsExpanded = true;
+                SelectedUnifiedZzNode = node;
+                return;
+            }
+
+            if (!IsVirtualNdfBinaryName(node.Name))
+            {
+                SetUnifiedStatus("Double-click open is available only for .ndfbin/.atlas files.");
                 return;
             }
 
@@ -1600,13 +1883,22 @@ namespace moddingSuite.ViewModel.Edata
 
                 File.WriteAllBytes(tempPath, bytes);
                 HandleNewFile(tempPath);
-                SetUnifiedStatus(string.Format("Opened virtual .ndfbin: {0}", normalizedPath));
+                SetUnifiedStatus(string.Format("Opened virtual NDF binary: {0}", normalizedPath));
             }
             catch (Exception ex)
             {
-                SetUnifiedStatus(string.Format("Failed to open virtual .ndfbin '{0}': {1}", node.RelativePath, ex.Message));
+                SetUnifiedStatus(string.Format("Failed to open virtual NDF binary '{0}': {1}", node.RelativePath, ex.Message));
                 Trace.TraceError("Failed to open virtual node {0}: {1}", node.RelativePath, ex);
             }
+        }
+
+        private static bool IsVirtualNdfBinaryName(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+                return false;
+
+            return fileName.EndsWith(".ndfbin", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.EndsWith(".atlas", StringComparison.OrdinalIgnoreCase);
         }
 
         private void ExtractUnifiedZzToFolderExecute(object obj)

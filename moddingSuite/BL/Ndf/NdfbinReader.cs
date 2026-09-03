@@ -117,6 +117,22 @@ namespace moddingSuite.BL.Ndf
 
         private byte[] DecompressBodyPayload(byte[] compressedPayload, int expectedBodySize, uint compressionFlag)
         {
+            // WARNO (v188908+, the same update that renamed mesh packs to MeshPack/) switched
+            // NDF bodies to ZSTD — the same move EUG already made for TGV textures. The old
+            // reader only knew LZ4 (flag 1) and zlib (flag 128), so it called LZ4Codec.Decode
+            // on zstd data and threw "LZ4 decompression failed" -> the headless Atlas CLI
+            // could not build the atlas map -> textures didn't import (white mesh). Detect the
+            // zstd frame magic (28 B5 2F FD) regardless of the flag and decompress with
+            // ZstdSharp (already referenced for TgvReader). Magic-gated, so LZ4/zlib data is
+            // untouched.
+            if (compressedPayload != null && compressedPayload.Length >= 4
+                && compressedPayload[0] == 0x28 && compressedPayload[1] == 0xB5
+                && compressedPayload[2] == 0x2F && compressedPayload[3] == 0xFD)
+            {
+                using (var dec = new ZstdSharp.Decompressor())
+                    return dec.Unwrap(compressedPayload).ToArray();
+            }
+
             switch (compressionFlag)
             {
                 case 1:
@@ -145,7 +161,15 @@ namespace moddingSuite.BL.Ndf
             int decodedLength = LZ4Codec.Decode(compressedPayload, 0, compressedPayload.Length, output, 0, output.Length);
 
             if (decodedLength <= 0)
-                throw new InvalidDataException("LZ4 decompression failed.");
+            {
+                // Self-diagnosing: report the payload's first bytes so an unknown new
+                // compression (other than the zstd we already handle) is identifiable.
+                int n = Math.Min(8, compressedPayload.Length);
+                throw new InvalidDataException(
+                    "LZ4 decompression failed (expectedBody=" + expectedBodySize +
+                    " payloadLen=" + compressedPayload.Length +
+                    " magic=" + BitConverter.ToString(compressedPayload, 0, n) + ").");
+            }
 
             if (decodedLength == expectedBodySize)
                 return output;

@@ -1,6 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFrameworks>net9.0-windows10.0.19041</TargetFrameworks>
+    <TargetFramework>net9.0-windows10.0.19041</TargetFramework>
+    <!-- Disable CET / hardware shadow-stack on the produced apphost. On CPUs with Intel
+         CET (11th-gen+/Zen3+) on certain Windows builds, the self-contained .NET runtime
+         hits a fatal CLR assert during GC thread-suspension
+         (!AreShadowStacksEnabled() || UseSpecialUserModeApc(), exit 0xC0000409) and the
+         CLI dies -> textures never resolve (white mesh). Turning CET off on the exe avoids
+         it. Same spirit as keeping ReadyToRun OFF for older CPUs. -->
+    <CetCompat>false</CetCompat>
     <OutputType>WinExe</OutputType>
     <PublishUrl>publish\</PublishUrl>
     <Install>true</Install>
@@ -31,7 +38,12 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <PropertyGroup>
-    <StartupObject>moddingSuite.App</StartupObject>
+    <!-- Custom entry: EntryPoint.Main dispatches CLI subcommands or boots the
+         WPF App. To make WPF NOT auto-generate its own Main (which would
+         conflict), App.xaml is registered as Page below instead of as the
+         default ApplicationDefinition. -->
+    <StartupObject>moddingSuite.EntryPoint</StartupObject>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
   </PropertyGroup>
   <PropertyGroup>
     <ApplicationIcon>icon.ico</ApplicationIcon>
@@ -289,5 +301,8 @@
     <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />
     <PackageReference Include="IronPython" Version="3.4.2" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.7" />
+    <PackageReference Include="Dirkster.AvalonDock" Version="4.72.1" />
+    <PackageReference Include="BCnEncoder.Net" Version="2.1.0" />
+    <PackageReference Include="SkiaSharp" Version="2.88.9" />
   </ItemGroup>
 </Project>

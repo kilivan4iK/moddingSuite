@@ -132,14 +132,24 @@ namespace moddingSuite.ViewModel.Ndf
         {
             return !string.IsNullOrWhiteSpace(_sourceNdfbinPath) &&
                    File.Exists(_sourceNdfbinPath) &&
-                   string.Equals(Path.GetExtension(_sourceNdfbinPath), ".ndfbin", StringComparison.OrdinalIgnoreCase);
+                   IsNdfBinaryLikePath(_sourceNdfbinPath);
+        }
+
+        private static bool IsNdfBinaryLikePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return false;
+
+            string extension = Path.GetExtension(path);
+            return string.Equals(extension, ".ndfbin", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(extension, ".atlas", StringComparison.OrdinalIgnoreCase);
         }
 
         private void ExportDecompressedNdfExecute(object obj)
         {
             if (!CanExportDecompressedNdfExecute())
             {
-                StatusText = "Decompression is available only for directly opened .ndfbin files.";
+                StatusText = "Decompression is available only for directly opened .ndfbin/.atlas files.";
                 return;
             }
 
@@ -240,7 +250,7 @@ namespace moddingSuite.ViewModel.Ndf
         {
             if (!CanExportDecompressedNdfExecute())
             {
-                StatusText = "Text decompilation is available only for directly opened .ndfbin files.";
+                StatusText = "Text decompilation is available only for directly opened .ndfbin/.atlas files.";
                 return;
             }
 
@@ -309,7 +319,7 @@ namespace moddingSuite.ViewModel.Ndf
         {
             if (!CanExportDecompressedNdfExecute())
             {
-                StatusText = "Byte-map is available only for directly opened .ndfbin files.";
+                StatusText = "Byte-map is available only for directly opened .ndfbin/.atlas files.";
                 return;
             }
 
@@ -377,7 +387,7 @@ namespace moddingSuite.ViewModel.Ndf
         {
             if (!CanExportDecompressedNdfExecute())
             {
-                StatusText = "Byte-map is available only for directly opened .ndfbin files.";
+                StatusText = "Byte-map is available only for directly opened .ndfbin/.atlas files.";
                 return;
             }
 
