@@ -20,6 +20,9 @@ public static class GfxCliRunner
     private const int ExitOk = 0;
     private const int ExitHardError = 3;
 
+    // Bump when the shape or the meaning of the cached index changes.
+    private const int GfxIndexCacheVersion = 1;
+
     private static readonly Regex HeaderRegex =
         new(@"^\s*(?:export\s+)?(?<name>\S+)\s+is\s+(?<class>[A-Za-z0-9_./$~]+)\b", RegexOptions.Compiled);
     private static readonly Regex UnnamedHeaderRegex =
@@ -92,6 +95,27 @@ public static class GfxCliRunner
     {
         public Dictionary<string, string> AssetPathByDescriptor { get; init; } = new();
         public List<string> SourceFiles { get; init; } = new();
+    }
+
+    /// <summary>
+    /// Everything the runner derives from the game's GFX dump before it looks at the
+    /// requested asset: the unit table, the weapon and weapon-operator tables and the
+    /// depiction registrations.  None of it depends on --asset-path, yet rebuilding it
+    /// meant reading four ndfbin files and re-parsing ~15 MB of decompiled script on
+    /// every single invocation - about 60 s per asset, paid again for each new model a
+    /// user imports.  Cached to disk under a signature of the source files so the first
+    /// asset pays it once and the rest load in a fraction of a second.
+    /// </summary>
+    private sealed class GfxIndexCachePayload
+    {
+        public int Version { get; init; } = GfxIndexCacheVersion;
+        public string CliVersion { get; init; } = "";
+        public string SourcesSignature { get; init; } = "";
+        public List<UnitInfo> Units { get; init; } = new();
+        public Dictionary<string, WeaponDescriptorInfo> Weapons { get; init; } = new();
+        public Dictionary<string, WeaponOperatorInfo> WeaponOperators { get; init; } = new();
+        public Dictionary<string, DepictionRegistrationInfo> Depictions { get; init; } = new();
+        public List<string> LegacySourceFiles { get; init; } = new();
     }
 
     private sealed class UnitInfo
@@ -206,45 +230,91 @@ public static class GfxCliRunner
         }
 
         Dictionary<string, string> sourceFiles = ResolveSourceFiles(warnoRoot);
-        Dictionary<string, BinaryIndex> binaries = sourceFiles.ToDictionary(
-            kvp => kvp.Key,
-            kvp => LoadBinaryIndex(kvp.Value, options.Verbose),
-            StringComparer.OrdinalIgnoreCase
-        );
-        string weaponScript = LoadCachedOrBuildScript(sourceFiles["Weapon"], cacheDir, "Weapon", options.Verbose);
-        string depictionScript = LoadCachedOrBuildScript(sourceFiles["Depiction"], cacheDir, "Depiction", options.Verbose);
+        string cliVersionForCache =
+            Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0.0";
 
-        if (options.Verbose)
+        // The whole GFX index below is asset-independent, so it is loaded from disk when the
+        // game files have not changed.  --verbose always rebuilds, because it also writes the
+        // decompiled debug scripts.
+        string indexSignature = ComputeGfxIndexSignature(sourceFiles, warnoRoot);
+        GfxIndexCachePayload? cachedIndex = options.Verbose
+            ? null
+            : LoadGfxIndexCache(cacheDir, indexSignature, cliVersionForCache);
+
+        List<UnitInfo> units;
+        Dictionary<string, WeaponDescriptorInfo> weapons;
+        Dictionary<string, WeaponOperatorInfo> weaponOperators;
+        Dictionary<string, DepictionRegistrationInfo> depictions;
+        List<string> legacySourceFiles;
+
+        if (cachedIndex != null)
         {
-            var scripts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["Unit"] = LoadCachedOrBuildScript(sourceFiles["Unit"], cacheDir, "Unit", false),
-                ["Weapon"] = weaponScript,
-                ["Depiction"] = depictionScript,
-                ["DepictionResources"] = LoadCachedOrBuildScript(sourceFiles["DepictionResources"], cacheDir, "DepictionResources", false),
-            };
-            WriteDebugScripts(cacheDir, scripts);
+            units = cachedIndex.Units;
+            // Rebuild with the case-insensitive comparer the lookups below rely on: a
+            // deserialized dictionary comes back ordinal/case-SENSITIVE, which would turn
+            // every descriptor lookup into a silent miss.
+            weapons = new Dictionary<string, WeaponDescriptorInfo>(cachedIndex.Weapons, StringComparer.OrdinalIgnoreCase);
+            weaponOperators = new Dictionary<string, WeaponOperatorInfo>(cachedIndex.WeaponOperators, StringComparer.OrdinalIgnoreCase);
+            depictions = new Dictionary<string, DepictionRegistrationInfo>(cachedIndex.Depictions, StringComparer.OrdinalIgnoreCase);
+            legacySourceFiles = cachedIndex.LegacySourceFiles;
         }
+        else
+        {
+            Dictionary<string, BinaryIndex> binaries = sourceFiles.ToDictionary(
+                kvp => kvp.Key,
+                kvp => LoadBinaryIndex(kvp.Value, options.Verbose),
+                StringComparer.OrdinalIgnoreCase
+            );
+            string weaponScript = LoadCachedOrBuildScript(sourceFiles["Weapon"], cacheDir, "Weapon", options.Verbose);
+            string depictionScript = LoadCachedOrBuildScript(sourceFiles["Depiction"], cacheDir, "Depiction", options.Verbose);
 
-        LegacyResourceMeshMapInfo legacyResourceMap = BuildLegacyResourceMeshMap(warnoRoot, cacheDir);
-        Dictionary<string, string> resourceMeshMap = legacyResourceMap.AssetPathByDescriptor;
-        List<UnitInfo> units = ParseUnitsDirect(binaries["Unit"], resourceMeshMap);
-        Dictionary<string, WeaponDescriptorInfo> weapons = MergeWeaponInfos(
-            ParseWeaponsDirect(binaries["Weapon"]),
-            ParseWeapons(weaponScript)
-        );
-        Dictionary<string, WeaponOperatorInfo> weaponOperators = ParseWeaponOperators(depictionScript);
-        Dictionary<string, DepictionRegistrationInfo> depictions = MergeDepictionInfos(
-            ParseDepictionRegistrationsDirect(
-                binaries["Depiction"],
-                resourceMeshMap
-            ),
-            ParseDepictionRegistrations(
-                depictionScript,
-                resourceMeshMap,
-                weaponOperators
-            )
-        );
+            if (options.Verbose)
+            {
+                var scripts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Unit"] = LoadCachedOrBuildScript(sourceFiles["Unit"], cacheDir, "Unit", false),
+                    ["Weapon"] = weaponScript,
+                    ["Depiction"] = depictionScript,
+                    ["DepictionResources"] = LoadCachedOrBuildScript(sourceFiles["DepictionResources"], cacheDir, "DepictionResources", false),
+                };
+                WriteDebugScripts(cacheDir, scripts);
+            }
+
+            LegacyResourceMeshMapInfo legacyResourceMap = BuildLegacyResourceMeshMap(warnoRoot, cacheDir);
+            Dictionary<string, string> resourceMeshMap = legacyResourceMap.AssetPathByDescriptor;
+            units = ParseUnitsDirect(binaries["Unit"], resourceMeshMap);
+            weapons = MergeWeaponInfos(
+                ParseWeaponsDirect(binaries["Weapon"]),
+                ParseWeapons(weaponScript)
+            );
+            weaponOperators = ParseWeaponOperators(depictionScript);
+            depictions = MergeDepictionInfos(
+                ParseDepictionRegistrationsDirect(
+                    binaries["Depiction"],
+                    resourceMeshMap
+                ),
+                ParseDepictionRegistrations(
+                    depictionScript,
+                    resourceMeshMap,
+                    weaponOperators
+                )
+            );
+            legacySourceFiles = legacyResourceMap.SourceFiles;
+
+            if (!options.Verbose)
+            {
+                SaveGfxIndexCache(
+                    cacheDir,
+                    indexSignature,
+                    cliVersionForCache,
+                    units,
+                    weapons,
+                    weaponOperators,
+                    depictions,
+                    legacySourceFiles
+                );
+            }
+        }
 
         List<UnitInfo> matchedUnits = MatchUnits(assetPath, units);
         List<string> operators = new();
@@ -310,9 +380,9 @@ public static class GfxCliRunner
             .Cast<object>()
             .ToList();
 
-        string cliVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0.0";
+        string cliVersion = cliVersionForCache;
         List<string> manifestSourceFiles = sourceFiles.Values
-            .Concat(legacyResourceMap.SourceFiles)
+            .Concat(legacySourceFiles)
             .Select(Path.GetFullPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
@@ -859,6 +929,122 @@ public static class GfxCliRunner
     private static LegacyResourceMeshMapInfo BuildLegacyResourceMeshMap(string warnoRoot)
     {
         return BuildLegacyResourceMeshMap(warnoRoot, string.Empty);
+    }
+
+    private static readonly JsonSerializerOptions GfxIndexCacheJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = false,
+    };
+
+    private static string GfxIndexCachePath(string cacheDir, string signature)
+    {
+        string sharedDir = Path.Combine(cacheDir, "_gfx_shared");
+        Directory.CreateDirectory(sharedDir);
+        return Path.Combine(sharedDir, $"gfx_index.v{GfxIndexCacheVersion}.{signature}.json");
+    }
+
+    /// <summary>
+    /// Identity of the game data the index was built from: every source file's path, size and
+    /// last-write time.  A game patch changes at least one of those, so the cache is rebuilt.
+    /// </summary>
+    private static string ComputeGfxIndexSignature(Dictionary<string, string> sourceFiles, string warnoRoot)
+    {
+        var sb = new StringBuilder();
+        sb.Append("root=").AppendLine(Path.GetFullPath(warnoRoot).ToLowerInvariant());
+        foreach (KeyValuePair<string, string> kvp in sourceFiles.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            sb.Append(kvp.Key).Append('=').Append(Path.GetFullPath(kvp.Value).ToLowerInvariant());
+            try
+            {
+                var fi = new FileInfo(kvp.Value);
+                sb.Append('|').Append(fi.Length).Append('|').Append(fi.LastWriteTimeUtc.Ticks);
+            }
+            catch
+            {
+                sb.Append("|?|?");
+            }
+
+            sb.AppendLine();
+        }
+
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+        return Convert.ToHexString(hash).Substring(0, 32).ToLowerInvariant();
+    }
+
+    private static GfxIndexCachePayload? LoadGfxIndexCache(string cacheDir, string signature, string cliVersion)
+    {
+        if (string.IsNullOrWhiteSpace(cacheDir))
+            return null;
+
+        try
+        {
+            string path = GfxIndexCachePath(cacheDir, signature);
+            if (!File.Exists(path))
+                return null;
+
+            GfxIndexCachePayload? payload = JsonSerializer.Deserialize<GfxIndexCachePayload>(
+                File.ReadAllText(path, Encoding.UTF8),
+                GfxIndexCacheJsonOptions
+            );
+            if (payload == null)
+                return null;
+            if (payload.Version != GfxIndexCacheVersion)
+                return null;
+            if (!string.Equals(payload.SourcesSignature, signature, StringComparison.Ordinal))
+                return null;
+            if (!string.Equals(payload.CliVersion, cliVersion, StringComparison.Ordinal))
+                return null;
+            // An index with no units at all would make every asset look unmatched; treat a
+            // payload that thin as corrupt and rebuild rather than serve it.
+            if (payload.Units.Count == 0)
+                return null;
+            return payload;
+        }
+        catch
+        {
+            return null; // unreadable or corrupt cache: rebuild
+        }
+    }
+
+    private static void SaveGfxIndexCache(
+        string cacheDir,
+        string signature,
+        string cliVersion,
+        List<UnitInfo> units,
+        Dictionary<string, WeaponDescriptorInfo> weapons,
+        Dictionary<string, WeaponOperatorInfo> weaponOperators,
+        Dictionary<string, DepictionRegistrationInfo> depictions,
+        List<string> legacySourceFiles)
+    {
+        if (string.IsNullOrWhiteSpace(cacheDir) || units.Count == 0)
+            return;
+
+        try
+        {
+            string path = GfxIndexCachePath(cacheDir, signature);
+            var payload = new GfxIndexCachePayload
+            {
+                Version = GfxIndexCacheVersion,
+                CliVersion = cliVersion,
+                SourcesSignature = signature,
+                Units = units,
+                Weapons = weapons,
+                WeaponOperators = weaponOperators,
+                Depictions = depictions,
+                LegacySourceFiles = legacySourceFiles,
+            };
+            // Write to a temp file and move into place so a killed run cannot leave a
+            // half-written cache that later loads as truncated data.
+            string temp = path + "." + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(payload, GfxIndexCacheJsonOptions), Encoding.UTF8);
+            File.Move(temp, path, overwrite: true);
+        }
+        catch
+        {
+            // best-effort cache only
+        }
     }
 
     private static LegacyResourceMeshMapInfo BuildLegacyResourceMeshMap(string warnoRoot, string cacheDir)

@@ -247,11 +247,17 @@ public static class AtlasCliRunner
         string[] relParts = rel.Split('/', StringSplitOptions.RemoveEmptyEntries);
         string relFs = Path.Combine(relParts);
 
+        // Order matters and must stay this way: the cache directory holds the atlas the
+        // caller just extracted from the CURRENT game archives for THIS asset, so it is the
+        // only candidate guaranteed to match the installed game version. "Output" and
+        // "Mods/ModData/base" are ambient folders of arbitrary age -- a machine that once
+        // extracted assets keeps thousands of pre-patch atlases under Output, and probing
+        // those first silently produced textures from an older build of the game.
         var candidates = new[]
         {
-            Path.Combine(warnoRoot, "Output", "PC", "Atlas", relFs, "TextureSmall.atlas"),
-            Path.Combine(warnoRoot, "Mods", "ModData", "base", "PC", "Atlas", relFs, "TextureSmall.atlas"),
             Path.Combine(cacheDir, "PC", "Atlas", relFs, "TextureSmall.atlas"),
+            Path.Combine(warnoRoot, "Mods", "ModData", "base", "PC", "Atlas", relFs, "TextureSmall.atlas"),
+            Path.Combine(warnoRoot, "Output", "PC", "Atlas", relFs, "TextureSmall.atlas"),
         };
 
         foreach (string candidate in candidates)

@@ -239,7 +239,21 @@ namespace moddingSuite.BL.Ndf
                     return cached;
             }
 
-            NameKnowledgeIndex built = NameKnowledgeIndex.Build(roots);
+            // The in-memory cache above only helps WITHIN one process, and the GFX CLI is
+            // launched as a fresh process per asset. Building this index means regex-scanning
+            // every .ndf text file under the roots, which measured ~158 s on a real install --
+            // paid again for every single asset imported. Persist it to disk under a signature
+            // of the scanned files so it is built once per game install instead.
+            List<string> scanned = NameKnowledgeIndex.EnumerateKnowledgeFiles(roots);
+            string signature = ComputeKnowledgeSignature(scanned);
+            string diskCachePath = ResolveKnowledgeDiskCachePath(signature);
+
+            NameKnowledgeIndex built = LoadKnowledgeFromDisk(diskCachePath);
+            if (built == null)
+            {
+                built = NameKnowledgeIndex.Build(roots);
+                SaveKnowledgeToDisk(diskCachePath, built);
+            }
 
             lock (CacheLock)
             {
@@ -247,6 +261,90 @@ namespace moddingSuite.BL.Ndf
             }
 
             return built;
+        }
+
+        private sealed class KnowledgePayload
+        {
+            public Dictionary<string, List<string>> ByGuid { get; set; } = new();
+            public Dictionary<string, List<string>> ByClassAndShort { get; set; } = new();
+            public Dictionary<string, List<string>> ByClassAndDebug { get; set; } = new();
+            public Dictionary<string, List<string>> ByClassAndCfg { get; set; } = new();
+        }
+
+        private static string ComputeKnowledgeSignature(List<string> files)
+        {
+            var sb = new StringBuilder();
+            foreach (string f in files)
+            {
+                sb.Append(f.ToLowerInvariant());
+                try
+                {
+                    var fi = new FileInfo(f);
+                    sb.Append('|').Append(fi.Length).Append('|').Append(fi.LastWriteTimeUtc.Ticks);
+                }
+                catch
+                {
+                    sb.Append("|?|?");
+                }
+                sb.AppendLine();
+            }
+
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+            return Convert.ToHexString(hash).Substring(0, 32).ToLowerInvariant();
+        }
+
+        private static string ResolveKnowledgeDiskCachePath(string signature)
+        {
+            try
+            {
+                string baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (string.IsNullOrWhiteSpace(baseDir))
+                    return string.Empty;
+                string dir = Path.Combine(baseDir, "moddingSuite", "ndf_name_index");
+                Directory.CreateDirectory(dir);
+                return Path.Combine(dir, "knowledge_" + signature + ".json");
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static NameKnowledgeIndex LoadKnowledgeFromDisk(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return null;
+            try
+            {
+                KnowledgePayload payload = System.Text.Json.JsonSerializer.Deserialize<KnowledgePayload>(
+                    File.ReadAllText(path, Encoding.UTF8));
+                if (payload == null)
+                    return null;
+                return NameKnowledgeIndex.FromPayload(payload);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void SaveKnowledgeToDisk(string path, NameKnowledgeIndex index)
+        {
+            if (string.IsNullOrWhiteSpace(path) || index == null)
+                return;
+            try
+            {
+                string tmp = path + ".tmp";
+                File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(index.ToPayload()), Encoding.UTF8);
+                if (File.Exists(path))
+                    File.Delete(path);
+                File.Move(tmp, path);
+            }
+            catch
+            {
+                // a cache we cannot write is not fatal; the index was still built in memory
+            }
         }
 
         private static List<string> ResolveKnowledgeRoots(string sourceNdfbinPath)
@@ -329,6 +427,58 @@ namespace moddingSuite.BL.Ndf
                 }
 
                 return new NameKnowledgeIndex(byGuid, byClassAndShort, byClassAndDebug, byClassAndCfg);
+            }
+
+            /// Same traversal Build() uses, exposed so the caller can fingerprint the inputs
+            /// without paying for the regex parse.
+            public static List<string> EnumerateKnowledgeFiles(IEnumerable<string> roots)
+            {
+                var files = new List<string>();
+                foreach (string root in roots)
+                {
+                    foreach (string file in EnumerateNdfFilesSafe(root))
+                        files.Add(file);
+                }
+                files.Sort(StringComparer.OrdinalIgnoreCase);
+                return files;
+            }
+
+            public KnowledgePayload ToPayload()
+            {
+                static Dictionary<string, List<string>> Flat(Dictionary<string, HashSet<string>> src)
+                {
+                    var outMap = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                    foreach (KeyValuePair<string, HashSet<string>> kv in src)
+                        outMap[kv.Key] = kv.Value.ToList();
+                    return outMap;
+                }
+
+                return new KnowledgePayload
+                {
+                    ByGuid = Flat(_byGuid),
+                    ByClassAndShort = Flat(_byClassAndShort),
+                    ByClassAndDebug = Flat(_byClassAndDebug),
+                    ByClassAndCfg = Flat(_byClassAndCfg),
+                };
+            }
+
+            public static NameKnowledgeIndex FromPayload(KnowledgePayload payload)
+            {
+                static Dictionary<string, HashSet<string>> Rehydrate(Dictionary<string, List<string>> src)
+                {
+                    var outMap = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                    if (src == null)
+                        return outMap;
+                    foreach (KeyValuePair<string, List<string>> kv in src)
+                        outMap[kv.Key] = new HashSet<string>(kv.Value ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                    return outMap;
+                }
+
+                return new NameKnowledgeIndex(
+                    Rehydrate(payload.ByGuid),
+                    Rehydrate(payload.ByClassAndShort),
+                    Rehydrate(payload.ByClassAndDebug),
+                    Rehydrate(payload.ByClassAndCfg));
             }
 
             public bool TryGetByGuid(string guid, out string name)
