@@ -14,7 +14,11 @@ Just double-click moddingSuite.exe. No .NET runtime install needed.
 CLI subcommands (same .exe, first argument selects mode)
 --------------------------------------------------------
   moddingSuite.exe atlas --warno-root <dir> --asset-path <p> --out-json <f> --cache-dir <d>
+                         [--atlas-file <f>] [--fallback ambient|none] [--include-sibling-assets] [--verbose]
       Atlas/texture metadata dumper (used by Blender plugin)
+      --atlas-file reads exactly that TextureSmall.atlas; --fallback none skips the
+      Mods/ModData/base and Output atlases. A missing --atlas-file or a bad --fallback
+      exits 3. The JSON reports atlas_source_kind.
   moddingSuite.exe gfx   --warno-root <dir> --asset-path <p> --out-json <f> --cache-dir <d>
                          [--gfx-root <dir>] [--verbose]
       GFX descriptor dumper (used by Blender plugin)
