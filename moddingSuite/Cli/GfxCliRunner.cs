@@ -21,7 +21,15 @@ public static class GfxCliRunner
     private const int ExitHardError = 3;
 
     // Bump when the shape or the meaning of the cached index changes.
-    private const int GfxIndexCacheVersion = 1;
+    // v2: keyed on the CLI build and the GFX source folder; payload carries the resource-map size.
+    private const int GfxIndexCacheVersion = 2;
+
+    private const string GfxSourceKindGfxRoot = "gfx_root";
+    private const string GfxSourceKindOutputDump = "output_dump";
+
+    // The four GFX ndfbin files the index is built from, keyed the way the rest of the runner
+    // looks them up.  Order matters only for deterministic messages.
+    private static readonly string[] RequiredGfxFileKeys = { "Unit", "Weapon", "Depiction", "DepictionResources" };
 
     private static readonly Regex HeaderRegex =
         new(@"^\s*(?:export\s+)?(?<name>\S+)\s+is\s+(?<class>[A-Za-z0-9_./$~]+)\b", RegexOptions.Compiled);
@@ -66,7 +74,14 @@ public static class GfxCliRunner
         public string AssetPath { get; init; } = "";
         public string OutJson { get; init; } = "";
         public string CacheDir { get; init; } = "";
+        public string GfxRoot { get; init; } = "";
         public bool Verbose { get; init; }
+    }
+
+    private sealed class GfxSourceInfo
+    {
+        public string Kind { get; init; } = "";
+        public string Dir { get; init; } = "";
     }
 
     private sealed class ScriptBlock
@@ -93,6 +108,7 @@ public static class GfxCliRunner
 
     private sealed class LegacyResourceMeshCachePayload
     {
+        public string SourcesSignature { get; init; } = "";
         public Dictionary<string, string> AssetPathByDescriptor { get; init; } = new();
         public List<string> SourceFiles { get; init; } = new();
     }
@@ -116,6 +132,7 @@ public static class GfxCliRunner
         public Dictionary<string, WeaponOperatorInfo> WeaponOperators { get; init; } = new();
         public Dictionary<string, DepictionRegistrationInfo> Depictions { get; init; } = new();
         public List<string> LegacySourceFiles { get; init; } = new();
+        public int ResourceMapEntries { get; init; }
     }
 
     private sealed class UnitInfo
@@ -229,14 +246,20 @@ public static class GfxCliRunner
             return ExitHardError;
         }
 
-        Dictionary<string, string> sourceFiles = ResolveSourceFiles(warnoRoot);
-        string cliVersionForCache =
-            Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0.0";
+        GfxSourceInfo gfxSource = ResolveGfxSource(warnoRoot, options.GfxRoot);
+        Dictionary<string, string> sourceFiles = ResolveSourceFiles(gfxSource);
+        string cliVersionForCache = GetCliVersion();
+
+        // Stat-only pass over the legacy text DepictionResources: cheap, and it lets both the
+        // index cache and the text-map cache notice an edited or added .ndf file.
+        List<string> legacyRoots = ResolveLegacyDepictionResourceRoots(warnoRoot).ToList();
+        List<string> legacyFiles = EnumerateLegacyDepictionResourceFiles(legacyRoots);
+        string legacySignature = ComputeLegacySourcesSignature(legacyRoots, legacyFiles);
 
         // The whole GFX index below is asset-independent, so it is loaded from disk when the
         // game files have not changed.  --verbose always rebuilds, because it also writes the
         // decompiled debug scripts.
-        string indexSignature = ComputeGfxIndexSignature(sourceFiles, warnoRoot);
+        string indexSignature = ComputeGfxIndexSignature(sourceFiles, warnoRoot, gfxSource, legacySignature);
         GfxIndexCachePayload? cachedIndex = options.Verbose
             ? null
             : LoadGfxIndexCache(cacheDir, indexSignature, cliVersionForCache);
@@ -246,6 +269,7 @@ public static class GfxCliRunner
         Dictionary<string, WeaponOperatorInfo> weaponOperators;
         Dictionary<string, DepictionRegistrationInfo> depictions;
         List<string> legacySourceFiles;
+        int resourceMapEntries;
 
         if (cachedIndex != null)
         {
@@ -257,14 +281,21 @@ public static class GfxCliRunner
             weaponOperators = new Dictionary<string, WeaponOperatorInfo>(cachedIndex.WeaponOperators, StringComparer.OrdinalIgnoreCase);
             depictions = new Dictionary<string, DepictionRegistrationInfo>(cachedIndex.Depictions, StringComparer.OrdinalIgnoreCase);
             legacySourceFiles = cachedIndex.LegacySourceFiles;
+            resourceMapEntries = cachedIndex.ResourceMapEntries;
         }
         else
         {
-            Dictionary<string, BinaryIndex> binaries = sourceFiles.ToDictionary(
-                kvp => kvp.Key,
-                kvp => LoadBinaryIndex(kvp.Value, options.Verbose),
-                StringComparer.OrdinalIgnoreCase
-            );
+            // DepictionResources.ndfbin is only identity (cache signature) and a --verbose debug
+            // dump: the decompiler cannot recover its Modele_* export names, so descriptor ->
+            // mesh paths come from the text DepictionResources below.  Skipping it saves a full
+            // decode and name resolution of that file on every index rebuild.
+            Dictionary<string, BinaryIndex> binaries = sourceFiles
+                .Where(kvp => !string.Equals(kvp.Key, "DepictionResources", StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(
+                    kvp => kvp.Key,
+                    kvp => LoadBinaryIndex(kvp.Value, options.Verbose),
+                    StringComparer.OrdinalIgnoreCase
+                );
             string weaponScript = LoadCachedOrBuildScript(sourceFiles["Weapon"], cacheDir, "Weapon", options.Verbose);
             string depictionScript = LoadCachedOrBuildScript(sourceFiles["Depiction"], cacheDir, "Depiction", options.Verbose);
 
@@ -280,8 +311,12 @@ public static class GfxCliRunner
                 WriteDebugScripts(cacheDir, scripts);
             }
 
-            LegacyResourceMeshMapInfo legacyResourceMap = BuildLegacyResourceMeshMap(warnoRoot, cacheDir);
+            LegacyResourceMeshMapInfo legacyResourceMap =
+                BuildLegacyResourceMeshMap(legacyFiles, legacySignature, cacheDir);
             Dictionary<string, string> resourceMeshMap = legacyResourceMap.AssetPathByDescriptor;
+            if (options.Verbose)
+                Console.Error.WriteLine($"gfx_resource_map entries={resourceMeshMap.Count}");
+
             units = ParseUnitsDirect(binaries["Unit"], resourceMeshMap);
             weapons = MergeWeaponInfos(
                 ParseWeaponsDirect(binaries["Weapon"]),
@@ -300,6 +335,7 @@ public static class GfxCliRunner
                 )
             );
             legacySourceFiles = legacyResourceMap.SourceFiles;
+            resourceMapEntries = resourceMeshMap.Count;
 
             if (!options.Verbose)
             {
@@ -311,7 +347,8 @@ public static class GfxCliRunner
                     weapons,
                     weaponOperators,
                     depictions,
-                    legacySourceFiles
+                    legacySourceFiles,
+                    resourceMapEntries
                 );
             }
         }
@@ -392,6 +429,16 @@ public static class GfxCliRunner
             schema_version = 2,
             asset_path = assetPath,
             source_files = manifestSourceFiles,
+            gfx_source = new
+            {
+                kind = gfxSource.Kind,
+                dir = gfxSource.Dir,
+            },
+            resource_map = new
+            {
+                source = "legacy_text",
+                entries = resourceMapEntries,
+            },
             matched_units = matchedUnits
                 .OrderBy(x => x.CoatingName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(x => x.Descriptor, StringComparer.OrdinalIgnoreCase)
@@ -498,8 +545,13 @@ public static class GfxCliRunner
             if (map.TryGetValue(key, out string? value) && !string.IsNullOrWhiteSpace(value))
                 return value;
             throw new ArgumentException(
-                "Required arguments: --warno-root --asset-path --out-json --cache-dir [--verbose]"
+                "Required arguments: --warno-root --asset-path --out-json --cache-dir [--gfx-root DIR] [--verbose]"
             );
+        }
+
+        string Optional(string key)
+        {
+            return map.TryGetValue(key, out string value) ? value : string.Empty;
         }
 
         return new CliOptions
@@ -508,8 +560,24 @@ public static class GfxCliRunner
             AssetPath = Require("--asset-path"),
             OutJson = Require("--out-json"),
             CacheDir = Require("--cache-dir"),
+            GfxRoot = Optional("--gfx-root"),
             Verbose = verbose,
         };
+    }
+
+    /// <summary>
+    /// "+" plus the first 8 hex chars of the module version id: the assembly version is a
+    /// constant 1.0.0.0, so without it two different builds report (and cache) identically.
+    /// </summary>
+    private static string GetCliVersion()
+    {
+        string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0.0";
+        return version + "+" + GetCliBuildId().ToString("N").Substring(0, 8);
+    }
+
+    private static Guid GetCliBuildId()
+    {
+        return Assembly.GetExecutingAssembly().ManifestModule.ModuleVersionId;
     }
 
     private static string ResolveOutputPath(string rawPath)
@@ -529,24 +597,61 @@ public static class GfxCliRunner
         return raw;
     }
 
-    private static Dictionary<string, string> ResolveSourceFiles(string warnoRoot)
+    private static GfxSourceInfo ResolveGfxSource(string warnoRoot, string gfxRootOption)
     {
-        string gfxRoot = Path.Combine(warnoRoot, "Output", "AllPlatforms", "NDF", "GFX");
-        var required = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        if (string.IsNullOrWhiteSpace(gfxRootOption))
         {
-            ["Unit"] = Path.Combine(gfxRoot, "Unit.ndfbin"),
-            ["Weapon"] = Path.Combine(gfxRoot, "Weapon.ndfbin"),
-            ["Depiction"] = Path.Combine(gfxRoot, "Depiction.ndfbin"),
-            ["DepictionResources"] = Path.Combine(gfxRoot, "DepictionResources.ndfbin"),
-        };
+            return new GfxSourceInfo
+            {
+                Kind = GfxSourceKindOutputDump,
+                Dir = Path.Combine(warnoRoot, "Output", "AllPlatforms", "NDF", "GFX"),
+            };
+        }
 
-        foreach (KeyValuePair<string, string> item in required)
+        string dir = Path.GetFullPath(gfxRootOption);
+        if (!Directory.Exists(dir))
+            throw new DirectoryNotFoundException($"--gfx-root not found: {dir}");
+
+        return new GfxSourceInfo
         {
-            if (!File.Exists(item.Value))
-                throw new FileNotFoundException($"Required GFX ndfbin not found: {item.Value}");
+            Kind = GfxSourceKindGfxRoot,
+            Dir = dir,
+        };
+    }
+
+    private static Dictionary<string, string> ResolveSourceFiles(GfxSourceInfo gfxSource)
+    {
+        bool isGfxRoot = gfxSource.Kind == GfxSourceKindGfxRoot;
+        var required = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string key in RequiredGfxFileKeys)
+        {
+            string expected = Path.Combine(gfxSource.Dir, key + ".ndfbin");
+            // The plugin extracts these from the game archive, where names are lower-case;
+            // on a case-sensitive file system the exact name would then never be found.
+            string resolved = isGfxRoot ? FindFileIgnoreCase(gfxSource.Dir, key + ".ndfbin") : expected;
+            if (string.IsNullOrEmpty(resolved) || !File.Exists(resolved))
+            {
+                throw new FileNotFoundException(isGfxRoot
+                    ? $"Required GFX ndfbin not found in --gfx-root: {expected}"
+                    : $"Required GFX ndfbin not found: {expected}");
+            }
+            required[key] = resolved;
         }
 
         return required;
+    }
+
+    private static string FindFileIgnoreCase(string dir, string fileName)
+    {
+        string exact = Path.Combine(dir, fileName);
+        if (File.Exists(exact))
+            return exact;
+
+        // Ordinal sort so the pick is deterministic when several case variants coexist.
+        return Directory.EnumerateFiles(dir)
+            .Where(path => string.Equals(Path.GetFileName(path), fileName, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .FirstOrDefault() ?? string.Empty;
     }
 
     private static BinaryIndex LoadBinaryIndex(string ndfPath, bool verbose)
@@ -926,11 +1031,6 @@ public static class GfxCliRunner
         return string.Empty;
     }
 
-    private static LegacyResourceMeshMapInfo BuildLegacyResourceMeshMap(string warnoRoot)
-    {
-        return BuildLegacyResourceMeshMap(warnoRoot, string.Empty);
-    }
-
     private static readonly JsonSerializerOptions GfxIndexCacheJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -945,32 +1045,72 @@ public static class GfxCliRunner
     }
 
     /// <summary>
-    /// Identity of the game data the index was built from: every source file's path, size and
-    /// last-write time.  A game patch changes at least one of those, so the cache is rebuilt.
+    /// Identity of everything the index was built from: every source file's path, size and
+    /// last-write time, the legacy text DepictionResources, and the CLI build itself.  A game
+    /// patch changes at least one file, and a rebuilt CLI may parse differently, so either
+    /// rebuilds the cache.
     /// </summary>
-    private static string ComputeGfxIndexSignature(Dictionary<string, string> sourceFiles, string warnoRoot)
+    private static string ComputeGfxIndexSignature(
+        Dictionary<string, string> sourceFiles,
+        string warnoRoot,
+        GfxSourceInfo gfxSource,
+        string legacySignature)
     {
         var sb = new StringBuilder();
         sb.Append("root=").AppendLine(Path.GetFullPath(warnoRoot).ToLowerInvariant());
+        // The assembly version never changes, so the module version id is the only thing
+        // that tells an index written by older parsing code apart.
+        sb.Append("cli_build=").AppendLine(GetCliBuildId().ToString("N"));
+        sb.Append("gfx_source=").Append(gfxSource.Kind).Append('|').AppendLine(gfxSource.Dir.ToLowerInvariant());
+        sb.Append("legacy_text=").AppendLine(legacySignature);
         foreach (KeyValuePair<string, string> kvp in sourceFiles.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
         {
-            sb.Append(kvp.Key).Append('=').Append(Path.GetFullPath(kvp.Value).ToLowerInvariant());
-            try
-            {
-                var fi = new FileInfo(kvp.Value);
-                sb.Append('|').Append(fi.Length).Append('|').Append(fi.LastWriteTimeUtc.Ticks);
-            }
-            catch
-            {
-                sb.Append("|?|?");
-            }
-
+            sb.Append(kvp.Key).Append('=');
+            AppendFileIdentity(sb, kvp.Value, lowerCasePath: true);
             sb.AppendLine();
         }
 
+        return HashSignature(sb.ToString());
+    }
+
+    private static void AppendFileIdentity(StringBuilder sb, string path, bool lowerCasePath)
+    {
+        string fullPath = Path.GetFullPath(path);
+        sb.Append(lowerCasePath ? fullPath.ToLowerInvariant() : fullPath);
+        try
+        {
+            var fi = new FileInfo(path);
+            sb.Append('|').Append(fi.Length).Append('|').Append(fi.LastWriteTimeUtc.Ticks);
+        }
+        catch
+        {
+            sb.Append("|?|?");
+        }
+    }
+
+    private static string HashSignature(string text)
+    {
         using var sha = System.Security.Cryptography.SHA256.Create();
-        byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+        byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(text));
         return Convert.ToHexString(hash).Substring(0, 32).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Path, size and last-write time of every legacy text DepictionResources file, plus the
+    /// roots searched, so an added, removed or edited .ndf invalidates the text-map cache.
+    /// </summary>
+    private static string ComputeLegacySourcesSignature(IEnumerable<string> roots, IEnumerable<string> files)
+    {
+        var sb = new StringBuilder();
+        foreach (string root in roots)
+            sb.Append("root=").AppendLine(Path.GetFullPath(root).ToLowerInvariant());
+        foreach (string file in files.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        {
+            AppendFileIdentity(sb, file, lowerCasePath: true);
+            sb.AppendLine();
+        }
+
+        return HashSignature(sb.ToString());
     }
 
     private static GfxIndexCachePayload? LoadGfxIndexCache(string cacheDir, string signature, string cliVersion)
@@ -1016,7 +1156,8 @@ public static class GfxCliRunner
         Dictionary<string, WeaponDescriptorInfo> weapons,
         Dictionary<string, WeaponOperatorInfo> weaponOperators,
         Dictionary<string, DepictionRegistrationInfo> depictions,
-        List<string> legacySourceFiles)
+        List<string> legacySourceFiles,
+        int resourceMapEntries)
     {
         if (string.IsNullOrWhiteSpace(cacheDir) || units.Count == 0)
             return;
@@ -1034,6 +1175,7 @@ public static class GfxCliRunner
                 WeaponOperators = weaponOperators,
                 Depictions = depictions,
                 LegacySourceFiles = legacySourceFiles,
+                ResourceMapEntries = resourceMapEntries,
             };
             // Write to a temp file and move into place so a killed run cannot leave a
             // half-written cache that later loads as truncated data.
@@ -1047,14 +1189,18 @@ public static class GfxCliRunner
         }
     }
 
-    private static LegacyResourceMeshMapInfo BuildLegacyResourceMeshMap(string warnoRoot, string cacheDir)
+    private static LegacyResourceMeshMapInfo BuildLegacyResourceMeshMap(
+        IReadOnlyList<string> legacyFiles,
+        string sourcesSignature,
+        string cacheDir)
     {
         string cachePath = string.Empty;
         if (!string.IsNullOrWhiteSpace(cacheDir))
         {
             string sharedDir = Path.Combine(cacheDir, "_gfx_shared");
             Directory.CreateDirectory(sharedDir);
-            cachePath = Path.Combine(sharedDir, "legacy_depiction_resources_map.v1.json");
+            // v2: v1 was reused whatever the text files had become; v2 stores their signature.
+            cachePath = Path.Combine(sharedDir, "legacy_depiction_resources_map.v2.json");
             if (File.Exists(cachePath))
             {
                 try
@@ -1062,7 +1208,8 @@ public static class GfxCliRunner
                     LegacyResourceMeshCachePayload? cached = JsonSerializer.Deserialize<LegacyResourceMeshCachePayload>(
                         File.ReadAllText(cachePath, Encoding.UTF8)
                     );
-                    if (cached != null && cached.AssetPathByDescriptor.Count > 0)
+                    if (cached != null &&
+                        string.Equals(cached.SourcesSignature, sourcesSignature, StringComparison.Ordinal))
                     {
                         return new LegacyResourceMeshMapInfo
                         {
@@ -1087,13 +1234,10 @@ public static class GfxCliRunner
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var sourceFiles = new List<string>();
 
-        foreach (string root in ResolveLegacyDepictionResourceRoots(warnoRoot))
+        foreach (string ndfPath in legacyFiles)
         {
-            foreach (string ndfPath in Directory.EnumerateFiles(root, "*.ndf", SearchOption.AllDirectories))
-            {
-                ParseLegacyDepictionResourceFile(ndfPath, result);
-                sourceFiles.Add(ndfPath);
-            }
+            ParseLegacyDepictionResourceFile(ndfPath, result);
+            sourceFiles.Add(ndfPath);
         }
 
         var info = new LegacyResourceMeshMapInfo
@@ -1107,27 +1251,45 @@ public static class GfxCliRunner
 
         if (!string.IsNullOrWhiteSpace(cachePath))
         {
-            try
+            var payload = new LegacyResourceMeshCachePayload
             {
-                var payload = new LegacyResourceMeshCachePayload
-                {
-                    AssetPathByDescriptor = info.AssetPathByDescriptor
-                        .ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase),
-                    SourceFiles = info.SourceFiles.ToList(),
-                };
-                File.WriteAllText(
-                    cachePath,
-                    JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }),
-                    Encoding.UTF8
-                );
-            }
-            catch
-            {
-                // best-effort cache only
-            }
+                SourcesSignature = sourcesSignature,
+                AssetPathByDescriptor = info.AssetPathByDescriptor
+                    .ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase),
+                SourceFiles = info.SourceFiles.ToList(),
+            };
+            WriteCacheFileAtomically(
+                cachePath,
+                JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true })
+            );
         }
 
         return info;
+    }
+
+    /// <summary>
+    /// Writes to a temp file and moves it into place, so a killed run cannot leave a truncated
+    /// cache that a later run would trust.  Best-effort: a failed write only costs a rebuild.
+    /// </summary>
+    private static void WriteCacheFileAtomically(string path, string content)
+    {
+        string temp = path + "." + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".tmp";
+        try
+        {
+            File.WriteAllText(temp, content, Encoding.UTF8);
+            File.Move(temp, path, overwrite: true);
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(temp);
+            }
+            catch
+            {
+                // nothing left to clean up
+            }
+        }
     }
 
     private static string LoadCachedOrBuildScript(string ndfPath, string cacheDir, string cacheKey, bool verbose)
@@ -1136,15 +1298,22 @@ public static class GfxCliRunner
         {
             string sharedDir = Path.Combine(cacheDir, "_gfx_shared");
             Directory.CreateDirectory(sharedDir);
-            string cachePath = Path.Combine(sharedDir, $"{cacheKey}.compiled.ndf.txt");
+            // Keyed on the source file's identity, not just cacheKey: --gfx-root can point at a
+            // different (possibly older) file of the same name, which a "cache is newer than
+            // source" test would wrongly accept.
+            var identity = new StringBuilder();
+            AppendFileIdentity(identity, ndfPath, lowerCasePath: false);
+            // ...and on the CLI build: the script is produced by NdfTextWriter/NdfScriptNameResolver,
+            // so a rebuilt CLI must not parse a script an older decompiler wrote (same reason the
+            // GFX index signature carries the build id).
+            identity.Append("cli_build=").Append(GetCliBuildId().ToString("N"));
+            string sourceId = HashSignature(identity.ToString()).Substring(0, 16);
+            string cachePath = Path.Combine(sharedDir, $"{cacheKey}.{sourceId}.compiled.ndf.txt");
             if (File.Exists(cachePath))
             {
                 try
                 {
-                    DateTime srcTime = File.GetLastWriteTimeUtc(ndfPath);
-                    DateTime cacheTime = File.GetLastWriteTimeUtc(cachePath);
-                    if (cacheTime >= srcTime)
-                        return File.ReadAllText(cachePath, Encoding.UTF8);
+                    return File.ReadAllText(cachePath, Encoding.UTF8);
                 }
                 catch
                 {
@@ -1153,18 +1322,19 @@ public static class GfxCliRunner
             }
 
             string built = LoadNdfScript(ndfPath, verbose);
-            try
-            {
-                File.WriteAllText(cachePath, built, Encoding.UTF8);
-            }
-            catch
-            {
-                // best-effort cache only
-            }
+            WriteCacheFileAtomically(cachePath, built);
             return built;
         }
 
         return LoadNdfScript(ndfPath, verbose);
+    }
+
+    private static List<string> EnumerateLegacyDepictionResourceFiles(IEnumerable<string> roots)
+    {
+        var files = new List<string>();
+        foreach (string root in roots)
+            files.AddRange(Directory.EnumerateFiles(root, "*.ndf", SearchOption.AllDirectories));
+        return files;
     }
 
     private static IEnumerable<string> ResolveLegacyDepictionResourceRoots(string warnoRoot)
@@ -1815,60 +1985,6 @@ public static class GfxCliRunner
         }
 
         return blocks;
-    }
-
-    private static Dictionary<string, string> ParseDepictionResources(string script)
-    {
-        var constants = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var outMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        string currentExport = string.Empty;
-        string currentMeshExpr = string.Empty;
-        bool inResource = false;
-
-        foreach (string rawLine in (script ?? string.Empty).Replace("\r\n", "\n").Split('\n'))
-        {
-            string line = rawLine.Trim();
-            if (string.IsNullOrWhiteSpace(line))
-                continue;
-
-            Match constMatch = ConstMeshRegex.Match(line);
-            if (constMatch.Success)
-            {
-                string exportName = constMatch.Groups["name"].Value.Trim();
-                string assetPath = NormalizeGameDataAssetPath(constMatch.Groups["path"].Value);
-                if (!string.IsNullOrWhiteSpace(exportName) && !string.IsNullOrWhiteSpace(assetPath))
-                    constants[exportName] = assetPath;
-                continue;
-            }
-
-            Match resourceMatch = ResourceMeshRegex.Match(line);
-            if (resourceMatch.Success)
-            {
-                currentExport = resourceMatch.Groups["name"].Value.Trim();
-                currentMeshExpr = string.Empty;
-                inResource = true;
-                continue;
-            }
-
-            if (!inResource)
-                continue;
-
-            Match meshAssign = MeshAssignRegex.Match(line);
-            if (meshAssign.Success)
-                currentMeshExpr = meshAssign.Groups["value"].Value.Trim();
-
-            if (line == ")")
-            {
-                string asset = ResolveMeshExpr(currentMeshExpr, constants);
-                if (!string.IsNullOrWhiteSpace(currentExport) && !string.IsNullOrWhiteSpace(asset))
-                    outMap[currentExport] = asset;
-                currentExport = string.Empty;
-                currentMeshExpr = string.Empty;
-                inResource = false;
-            }
-        }
-
-        return outMap;
     }
 
     private static List<UnitInfo> ParseUnits(string script, IReadOnlyDictionary<string, string> resourceMeshMap)

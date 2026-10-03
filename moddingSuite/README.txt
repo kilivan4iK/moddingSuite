@@ -16,7 +16,11 @@ CLI subcommands (same .exe, first argument selects mode)
   moddingSuite.exe atlas --warno-root <dir> --asset-path <p> --out-json <f> --cache-dir <d>
       Atlas/texture metadata dumper (used by Blender plugin)
   moddingSuite.exe gfx   --warno-root <dir> --asset-path <p> --out-json <f> --cache-dir <d>
+                         [--gfx-root <dir>] [--verbose]
       GFX descriptor dumper (used by Blender plugin)
+      --gfx-root replaces <warno-root>\Output\AllPlatforms\NDF\GFX as the folder holding
+      Unit/Weapon/Depiction/DepictionResources.ndfbin (names matched case-insensitively);
+      a missing folder or file exits 3. The JSON reports gfx_source and resource_map.
   moddingSuite.exe ess   <file.ess> [more.ess ...]
       ESS -> WAV batch converter (stereo-correct)
   moddingSuite.exe tgv   <file.tgv> [more.tgv ...]
