@@ -25,6 +25,8 @@ public static class AtlasCliRunner
         public required string CacheDir { get; init; }
         public bool Verbose { get; init; }
         public bool IncludeSiblingAssets { get; init; }
+        public string AtlasFile { get; init; }
+        public bool AmbientFallback { get; init; } = true;
     }
 
     private sealed class ContainerInfo
@@ -89,12 +91,34 @@ public static class AtlasCliRunner
             return ExitHardError;
         }
 
-        string? atlasPath = ResolveAtlasPath(
-            warnoRoot: warnoRoot,
-            cacheDir: cacheDir,
-            assetPath: assetPath,
-            verbose: options.Verbose
-        );
+        string atlasPath;
+        string atlasSourceKind;
+        if (options.AtlasFile is not null)
+        {
+            // The caller extracted this exact atlas from the current game archives, so it
+            // is authoritative: probing other folders here could only pick a stale copy.
+            atlasPath = Path.GetFullPath(options.AtlasFile);
+            atlasSourceKind = "atlas_file";
+            if (options.Verbose)
+            {
+                Console.Error.WriteLine($"atlas_candidate={atlasPath}");
+            }
+            if (!File.Exists(atlasPath))
+            {
+                Console.Error.WriteLine($"atlas_cli_error: --atlas-file not found: {atlasPath}");
+                return ExitHardError;
+            }
+        }
+        else
+        {
+            (atlasPath, atlasSourceKind) = ResolveAtlasPath(
+                warnoRoot: warnoRoot,
+                cacheDir: cacheDir,
+                assetPath: assetPath,
+                ambientFallback: options.AmbientFallback,
+                verbose: options.Verbose
+            );
+        }
         if (string.IsNullOrWhiteSpace(atlasPath))
         {
             Console.Error.WriteLine($"Atlas not found for asset: {assetPath}");
@@ -104,6 +128,7 @@ public static class AtlasCliRunner
         if (options.Verbose)
         {
             Console.Error.WriteLine($"atlas_source={atlasPath}");
+            Console.Error.WriteLine($"atlas_source_kind={atlasSourceKind}");
         }
 
         var reader = new NdfbinReader();
@@ -123,7 +148,7 @@ public static class AtlasCliRunner
             return ExitNoEntries;
         }
 
-        string cliVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0.0";
+        string cliVersion = BuildCliVersion();
         List<string> includedAssetPaths = textures
             .Select(t => t.SourceAssetPath)
             .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -136,6 +161,7 @@ public static class AtlasCliRunner
             asset_path = assetPath,
             included_asset_paths = includedAssetPaths,
             atlas_source = atlasPath,
+            atlas_source_kind = atlasSourceKind,
             generated_at = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
             cli_version = cliVersion,
             textures = textures
@@ -215,17 +241,56 @@ public static class AtlasCliRunner
 
             throw new ArgumentException(
                 "Required arguments: --warno-root --asset-path --out-json --cache-dir [--verbose] [--include-sibling-assets]"
+                + " [--atlas-file PATH] [--fallback ambient|none]"
             );
+        }
+
+        // Required arguments are checked first so a bare invocation still prints the usage line.
+        string warnoRoot = Require("--warno-root");
+        string assetPath = Require("--asset-path");
+        string outJson = Require("--out-json");
+        string cacheDir = Require("--cache-dir");
+
+        // For the new options "absent" and "present with a blank value" must differ: a blank
+        // --atlas-file must not fall through to the ambient search (which can pick a stale
+        // pre-patch atlas), and a blank --fallback is an invalid value, not the default.
+        string fallback = map.TryGetValue("--fallback", out string rawFallback) ? rawFallback : "ambient";
+        bool ambientFallback;
+        if (fallback.Equals("ambient", StringComparison.OrdinalIgnoreCase))
+        {
+            ambientFallback = true;
+        }
+        else if (fallback.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            ambientFallback = false;
+        }
+        else
+        {
+            string shown = string.IsNullOrWhiteSpace(fallback) ? "(empty)" : fallback;
+            throw new ArgumentException($"Invalid value for --fallback: {shown} (expected ambient|none)");
+        }
+
+        string atlasFile = null;
+        if (map.TryGetValue("--atlas-file", out string rawAtlasFile))
+        {
+            if (string.IsNullOrWhiteSpace(rawAtlasFile))
+            {
+                // An empty path is never an existing file; report it like any other missing one.
+                throw new ArgumentException("atlas_cli_error: --atlas-file not found: (empty path)");
+            }
+            atlasFile = rawAtlasFile;
         }
 
         return new CliOptions
         {
-            WarnoRoot = Require("--warno-root"),
-            AssetPath = Require("--asset-path"),
-            OutJson = Require("--out-json"),
-            CacheDir = Require("--cache-dir"),
+            WarnoRoot = warnoRoot,
+            AssetPath = assetPath,
+            OutJson = outJson,
+            CacheDir = cacheDir,
             Verbose = verbose,
             IncludeSiblingAssets = includeSiblingAssets,
+            AtlasFile = atlasFile,
+            AmbientFallback = ambientFallback,
         };
     }
 
@@ -240,7 +305,24 @@ public static class AtlasCliRunner
         return Path.Combine(p, "atlas_map.json");
     }
 
-    private static string? ResolveAtlasPath(string warnoRoot, string cacheDir, string assetPath, bool verbose)
+    private static string BuildCliVersion()
+    {
+        // The assembly version is a constant 1.0.0.0, so on its own it cannot tell two
+        // builds apart; consumers key their caches on cli_version. The module version id
+        // changes on every compile, so the suffix identifies the exact build.
+        Assembly assembly = Assembly.GetExecutingAssembly();
+        string version = assembly.GetName().Version?.ToString() ?? "0.0.0.0";
+        string buildId = assembly.ManifestModule.ModuleVersionId.ToString("N")[..8];
+        return $"{version}+{buildId}";
+    }
+
+    private static (string Path, string Kind) ResolveAtlasPath(
+        string warnoRoot,
+        string cacheDir,
+        string assetPath,
+        bool ambientFallback,
+        bool verbose
+    )
     {
         string assetDir = Path.GetDirectoryName(assetPath.Replace('/', Path.DirectorySeparatorChar)) ?? "Assets";
         string rel = assetDir.Replace(Path.DirectorySeparatorChar, '/');
@@ -253,14 +335,24 @@ public static class AtlasCliRunner
         // "Mods/ModData/base" are ambient folders of arbitrary age -- a machine that once
         // extracted assets keeps thousands of pre-patch atlases under Output, and probing
         // those first silently produced textures from an older build of the game.
-        var candidates = new[]
+        // "--fallback none" lets a caller that knows its cache is complete refuse the
+        // ambient folders outright: a missing atlas then fails loudly instead of silently
+        // resolving to a pre-patch copy.
+        var candidates = new List<(string Path, string Kind)>
         {
-            Path.Combine(cacheDir, "PC", "Atlas", relFs, "TextureSmall.atlas"),
-            Path.Combine(warnoRoot, "Mods", "ModData", "base", "PC", "Atlas", relFs, "TextureSmall.atlas"),
-            Path.Combine(warnoRoot, "Output", "PC", "Atlas", relFs, "TextureSmall.atlas"),
+            (Path.Combine(cacheDir, "PC", "Atlas", relFs, "TextureSmall.atlas"), "cache"),
         };
+        if (ambientFallback)
+        {
+            candidates.Add((Path.Combine(warnoRoot, "Mods", "ModData", "base", "PC", "Atlas", relFs, "TextureSmall.atlas"), "mods_base"));
+            candidates.Add((Path.Combine(warnoRoot, "Output", "PC", "Atlas", relFs, "TextureSmall.atlas"), "output"));
+        }
+        else if (verbose)
+        {
+            Console.Error.WriteLine("atlas_fallback=none (Mods/ModData/base and Output not searched)");
+        }
 
-        foreach (string candidate in candidates)
+        foreach ((string candidate, string kind) in candidates)
         {
             if (verbose)
             {
@@ -269,11 +361,11 @@ public static class AtlasCliRunner
 
             if (File.Exists(candidate))
             {
-                return Path.GetFullPath(candidate);
+                return (Path.GetFullPath(candidate), kind);
             }
         }
 
-        return null;
+        return (null, "");
     }
 
     private static Dictionary<uint, ContainerInfo> BuildContainerMap(NdfBinary ndf, string assetPath)
@@ -338,6 +430,7 @@ public static class AtlasCliRunner
 
             uint? containerId = ReadObjectReferenceId(obj, "Container");
             ContainerInfo container = ResolveContainer(containers, containerId);
+            bool containerResolved = containerId.HasValue && containers.ContainsKey(containerId.Value);
 
             // WARNO v2 atlas part schema: AbsPos (EugFloat2 pixel x,y), SizeInPixels
             // (EugFloat2 pixel w,h), MinUV/MaxUV (EugFloat2). The first part at the
@@ -375,6 +468,32 @@ public static class AtlasCliRunner
                 continue;
             }
 
+            x = Math.Max(0, x);
+            y = Math.Max(0, y);
+            // Only trust the page size of the container this part actually references (or
+            // the sole container): ResolveContainer otherwise guesses the first container,
+            // whose page may be a different size.
+            if (containerResolved || containers.Count == 1)
+            {
+                (_, _, int clampedW, int clampedH) = ClampCropRectToPage(x, y, w, h, cw, ch);
+                if (verbose && (clampedW != w || clampedH != h))
+                {
+                    Console.Error.WriteLine(
+                        $"part_clamped rect=({x},{y},{w},{h}) -> ({x},{y},{clampedW},{clampedH}) page={cw}x{ch}"
+                    );
+                }
+                w = clampedW;
+                h = clampedH;
+                // Anything still past a known page edge is more than rounding (or a page size
+                // that disagrees with the real TGV): emit it unchanged so the consumer can report it.
+                if (verbose && ((cw > 0 && x + w > cw) || (ch > 0 && y + h > ch)))
+                {
+                    Console.Error.WriteLine(
+                        $"part_overshoot rect=({x},{y},{w},{h}) page={cw}x{ch} (left unclamped)"
+                    );
+                }
+            }
+
             List<TargetItem> targets = ParseTargets(
                 partRaw: partRaw,
                 assetDir: assetDir,
@@ -409,8 +528,8 @@ public static class AtlasCliRunner
                 SourceTgvRel = sourceTgvRel,
                 SourceRole = container.SourceRole,
                 SourceAssetPath = sourceAssetPath,
-                X = Math.Max(0, x),
-                Y = Math.Max(0, y),
+                X = x,
+                Y = y,
                 W = w,
                 H = h,
                 Targets = targets,
@@ -418,6 +537,34 @@ public static class AtlasCliRunner
         }
 
         return textures;
+    }
+
+    // AbsPos/SizeInPixels are rounded AwayFromZero, so a part flush with the page edge can
+    // come out 1 px past it (x=512.5 -> 513 and w=511.5 -> 512 give 1025 on a 1024 page).
+    // Only that rounding overshoot is trimmed: the rect is shrunk by exactly 1 px on the
+    // affected axis, never grown, an unknown page size (0) leaves it untouched, and a larger
+    // overshoot (or one that would collapse the rect to <= 0) is left as-is, because it means
+    // the page size disagrees with the real texture and the consumer must see the full rect
+    // to report it (the plugin's own crop also tolerates exactly 1 px).
+    internal const int MaxRoundingOvershootPx = 1;
+
+    internal static (int X, int Y, int W, int H) ClampCropRectToPage(int x, int y, int w, int h, int pageW, int pageH)
+    {
+        return (x, y, ClampAxis(x, w, pageW), ClampAxis(y, h, pageH));
+    }
+
+    private static int ClampAxis(int pos, int size, int page)
+    {
+        if (page <= 0)
+        {
+            return size;
+        }
+        int overshoot = pos + size - page;
+        if (overshoot > 0 && overshoot <= MaxRoundingOvershootPx && page - pos > 0)
+        {
+            return page - pos;
+        }
+        return size;
     }
 
     private static ContainerInfo ResolveContainer(Dictionary<uint, ContainerInfo> containers, uint? containerId)

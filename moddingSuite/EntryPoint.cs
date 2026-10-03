@@ -32,15 +32,25 @@ namespace moddingSuite
                     // see the CLI output.
                     AttachConsole(ATTACH_PARENT_PROCESS);
 
-                    string[] rest = args.Skip(1).ToArray();
-                    return subcommand switch
+                    // After AttachConsole (the code page belongs to the console we just
+                    // joined) and before the first write, so every line is UTF-8.
+                    uint restoreCodePage = CliConsoleEncoding.UseUtf8Output();
+                    try
                     {
-                        "atlas" => AtlasCliRunner.Run(rest),
-                        "gfx"   => GfxCliRunner.Run(rest),
-                        "ess"   => EssCliRunner.Run(rest),
-                        "tgv"   => TgvCliRunner.Run(rest),
-                        _       => 1,
-                    };
+                        string[] rest = args.Skip(1).ToArray();
+                        return subcommand switch
+                        {
+                            "atlas" => AtlasCliRunner.Run(rest),
+                            "gfx"   => GfxCliRunner.Run(rest),
+                            "ess"   => EssCliRunner.Run(rest),
+                            "tgv"   => TgvCliRunner.Run(rest),
+                            _       => 1,
+                        };
+                    }
+                    finally
+                    {
+                        CliConsoleEncoding.RestoreCodePage(restoreCodePage);
+                    }
                 }
             }
 
